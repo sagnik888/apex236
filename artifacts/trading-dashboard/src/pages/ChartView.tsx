@@ -123,10 +123,13 @@ export default function ChartView() {
     const chart  = chartRef.current;
     if (!series || !chart || !chartData || !chartReady) return;
 
-    // Candles — API already sends Unix seconds
+    // ── Apply IST Offset (5h 30m) so chart displays correctly in IST ──
+    const IST_OFFSET = 19800; // 5.5 * 60 * 60 seconds
+
+    // Candles — API already sends Unix seconds (UTC)
     const seen = new Set<number>();
     const candles = chartData.candles
-      .map(c => ({ time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close }))
+      .map(c => ({ time: (c.time + IST_OFFSET) as Time, open: c.open, high: c.high, low: c.low, close: c.close }))
       .filter(c => { const t = c.time as number; if (seen.has(t)) return false; seen.add(t); return true; })
       .sort((a, b) => (a.time as number) - (b.time as number));
 
@@ -143,7 +146,7 @@ export default function ChartView() {
       const seenMarkerTimes = new Set<number>();
       const markers: SeriesMarker<Time>[] = chartData.signals
         .map(s => ({
-          time:     s.time as Time,
+          time:     (s.time + IST_OFFSET) as Time,
           position: s.type === "BUY" ? "belowBar" as const : "aboveBar" as const,
           color:    s.type === "BUY" ? "#00FF66" : "#FF3366",
           shape:    s.type === "BUY" ? "arrowUp"  as const : "arrowDown" as const,
