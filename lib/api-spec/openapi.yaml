@@ -1,0 +1,651 @@
+openapi: 3.1.0
+info:
+  # Do not change the title, if the title changes, the import paths will be broken
+  title: Api
+  version: 0.1.0
+  description: APEX Nifty 50 Trading Scanner API
+servers:
+  - url: /api
+    description: Base API path
+tags:
+  - name: health
+    description: Health operations
+  - name: scanner
+    description: Scanner operations
+  - name: signals
+    description: Signal data
+  - name: trades
+    description: Trade tracking
+  - name: chart
+    description: Chart data
+  - name: session
+    description: Market session
+paths:
+  /healthz:
+    get:
+      operationId: healthCheck
+      tags: [health]
+      summary: Health check
+      responses:
+        "200":
+          description: Healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthStatus"
+  /session:
+    get:
+      operationId: getSession
+      tags: [session]
+      summary: Get current NSE market session status
+      responses:
+        "200":
+          description: Market session info
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionResponse"
+  /signals:
+    get:
+      operationId: getSignals
+      tags: [signals]
+      summary: Get all scanner signals across symbols and timeframes
+      parameters:
+        - name: timeframe
+          in: query
+          schema:
+            type: ["string", "null"]
+        - name: direction
+          in: query
+          schema:
+            type: ["string", "null"]
+      responses:
+        "200":
+          description: List of signals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SignalsResponse"
+  /trades:
+    get:
+      operationId: getTrades
+      tags: [trades]
+      summary: Get all active and pending trades
+      responses:
+        "200":
+          description: List of active trades
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TradesResponse"
+  /leaderboard:
+    get:
+      operationId: getLeaderboard
+      tags: [scanner]
+      summary: Get sorted scanner leaderboard
+      parameters:
+        - name: timeframe
+          in: query
+          schema:
+            type: ["string", "null"]
+      responses:
+        "200":
+          description: Leaderboard data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LeaderboardResponse"
+  /chart/{symbol}/{timeframe}:
+    get:
+      operationId: getChart
+      tags: [chart]
+      summary: Get OHLCV candles and signals for a symbol
+      parameters:
+        - name: symbol
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: timeframe
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Chart data with candles and signals
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChartResponse"
+  /stats:
+    get:
+      operationId: getScannerStats
+      tags: [scanner]
+      summary: Get overall scanner statistics
+      responses:
+        "200":
+          description: Scanner statistics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatsResponse"
+  /symbols:
+    get:
+      operationId: getSymbols
+      tags: [scanner]
+      summary: Get list of tracked symbols and timeframes
+      responses:
+        "200":
+          description: Symbol and timeframe list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SymbolsResponse"
+  /scan:
+    post:
+      operationId: triggerScan
+      tags: [scanner]
+      summary: Trigger a fresh scan of all symbols
+      responses:
+        "200":
+          description: Scan triggered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScanTriggerResponse"
+components:
+  schemas:
+    HealthStatus:
+      type: object
+      properties:
+        status:
+          type: string
+        version:
+          type: string
+        scanning:
+          type: boolean
+        last_scan:
+          type: ["string", "null"]
+      required:
+        - status
+    SessionResponse:
+      type: object
+      properties:
+        session_status:
+          type: string
+          description: "OPEN | PRE_OPEN | CLOSED | HOLIDAY | WEEKEND"
+        market_open:
+          type: boolean
+        nse_time:
+          type: string
+        next_open:
+          type: ["string", "null"]
+        next_close:
+          type: ["string", "null"]
+        nse_open:
+          type: string
+        nse_close:
+          type: string
+        exchange:
+          type: string
+      required:
+        - session_status
+        - market_open
+        - nse_time
+        - exchange
+    Signal:
+      type: object
+      properties:
+        symbol:
+          type: string
+        timeframe:
+          type: string
+        direction:
+          type: string
+        score:
+          type: number
+        state:
+          type: string
+        entry:
+          type: ["number", "null"]
+        sl1:
+          type: ["number", "null"]
+        sl2:
+          type: ["number", "null"]
+        tp1:
+          type: ["number", "null"]
+        tp2:
+          type: ["number", "null"]
+        tp3:
+          type: ["number", "null"]
+        setup:
+          type: string
+        timestamp:
+          type: ["string", "null"]
+        close:
+          type: number
+        rsi:
+          type: ["number", "null"]
+        adx:
+          type: ["number", "null"]
+        bias:
+          type: string
+        bull_score:
+          type: ["number", "null"]
+        bear_score:
+          type: ["number", "null"]
+        regime:
+          type: string
+        win_rate_pct:
+          type: ["number", "null"]
+        pnl_pct:
+          type: ["number", "null"]
+        live_pnl_pct:
+          type: ["number", "null"]
+        live_pnl_abs:
+          type: ["number", "null"]
+        live_rr:
+          type: ["number", "null"]
+        intraday_or_swing:
+          type: string
+          description: "Intraday (15m/1h) or Swing (4h/1d)"
+        daily_move_pct:
+          type: ["number", "null"]
+          description: "Today's price move from market open (%)"
+        trade_age_hrs:
+          type: ["number", "null"]
+          description: "Hours since signal/entry"
+        eta_hrs:
+          type: ["number", "null"]
+          description: "Estimated hours remaining in trade (negative = overdue)"
+        expected_duration_hrs:
+          type: number
+          description: "Typical trade duration for this timeframe"
+        active_timeframes:
+          type: "object"
+          additionalProperties:
+            type: "string"
+      required:
+        - symbol
+        - timeframe
+        - direction
+        - score
+        - state
+        - setup
+        - close
+        - bias
+        - regime
+        - intraday_or_swing
+        - expected_duration_hrs
+    SignalsResponse:
+      type: object
+      properties:
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/Signal"
+        last_scan:
+          type: ["string", "null"]
+        scanning:
+          type: boolean
+        total_signals:
+          type: integer
+        buy_signals:
+          type: integer
+        sell_signals:
+          type: integer
+        active_trades:
+          type: integer
+      required:
+        - signals
+        - scanning
+        - total_signals
+        - buy_signals
+        - sell_signals
+        - active_trades
+    ActiveTrade:
+      type: object
+      properties:
+        symbol:
+          type: string
+        timeframe:
+          type: string
+        direction:
+          type: string
+        entry_price:
+          type: number
+        current_price:
+          type: number
+        sl1:
+          type: number
+        sl2:
+          type: ["number", "null"]
+        tp1:
+          type: number
+        tp2:
+          type: ["number", "null"]
+        tp3:
+          type: ["number", "null"]
+        pnl_pct:
+          type: number
+        pnl_points:
+          type: number
+        t1_hit:
+          type: boolean
+        t2_hit:
+          type: boolean
+        t3_hit:
+          type: boolean
+        setup:
+          type: string
+        entry_time:
+          type: ["string", "null"]
+        signal_time:
+          type: ["string", "null"]
+        state:
+          type: string
+        live_rr:
+          type: ["number", "null"]
+        tsl:
+          type: ["number", "null"]
+        intraday_or_swing:
+          type: string
+        daily_move_pct:
+          type: ["number", "null"]
+        live_move_pct:
+          type: ["number", "null"]
+        live_move_pts:
+          type: ["number", "null"]
+        trade_age_hrs:
+          type: ["number", "null"]
+        eta_hrs:
+          type: ["number", "null"]
+        expected_duration_hrs:
+          type: number
+        score:
+          type: number
+      required:
+        - symbol
+        - timeframe
+        - direction
+        - entry_price
+        - current_price
+        - sl1
+        - tp1
+        - pnl_pct
+        - pnl_points
+        - t1_hit
+        - t2_hit
+        - t3_hit
+        - setup
+        - state
+        - intraday_or_swing
+        - expected_duration_hrs
+        - score
+    TradesResponse:
+      type: object
+      properties:
+        trades:
+          type: array
+          items:
+            $ref: "#/components/schemas/ActiveTrade"
+        total:
+          type: integer
+        long_count:
+          type: integer
+        short_count:
+          type: integer
+      required:
+        - trades
+        - total
+        - long_count
+        - short_count
+    LeaderboardRow:
+      type: object
+      properties:
+        symbol:
+          type: string
+        timeframe:
+          type: string
+        state:
+          type: string
+        signal:
+          type: string
+        score:
+          type: number
+        close:
+          type: number
+        bias:
+          type: string
+        rsi:
+          type: ["number", "null"]
+        adx:
+          type: ["number", "null"]
+        win_rate_pct:
+          type: ["number", "null"]
+        pnl_pct:
+          type: ["number", "null"]
+        live_pnl_pct:
+          type: ["number", "null"]
+        live_pnl_abs:
+          type: ["number", "null"]
+        setup:
+          type: string
+        regime:
+          type: string
+        intraday_or_swing:
+          type: string
+        daily_move_pct:
+          type: ["number", "null"]
+      required:
+        - symbol
+        - timeframe
+        - state
+        - signal
+        - score
+        - close
+        - bias
+        - setup
+        - regime
+        - intraday_or_swing
+    LeaderboardResponse:
+      type: object
+      properties:
+        rows:
+          type: array
+          items:
+            $ref: "#/components/schemas/LeaderboardRow"
+        last_scan:
+          type: ["string", "null"]
+        scanning:
+          type: boolean
+      required:
+        - rows
+        - scanning
+    Candle:
+      type: object
+      properties:
+        time:
+          type: integer
+          description: "Unix timestamp in seconds (UTC)"
+        open:
+          type: number
+        high:
+          type: number
+        low:
+          type: number
+        close:
+          type: number
+        volume:
+          type: number
+      required:
+        - time
+        - open
+        - high
+        - low
+        - close
+        - volume
+    ChartSignalMarker:
+      type: object
+      properties:
+        time:
+          type: integer
+          description: "Unix timestamp in seconds (UTC)"
+        type:
+          type: string
+        price:
+          type: number
+        tp1:
+          type: ["number", "null"]
+        tp2:
+          type: ["number", "null"]
+        tp3:
+          type: ["number", "null"]
+        sl:
+          type: ["number", "null"]
+        score:
+          type: ["number", "null"]
+        setup:
+          type: string
+      required:
+        - time
+        - type
+        - price
+        - setup
+    ChartActiveTrade:
+      type: object
+      properties:
+        direction:
+          type: string
+        entry_price:
+          type: ["number", "null"]
+        entry_time:
+          type: ["string", "null"]
+        signal_time:
+          type: ["string", "null"]
+        sl1:
+          type: ["number", "null"]
+        sl2:
+          type: ["number", "null"]
+        tp1:
+          type: ["number", "null"]
+        tp2:
+          type: ["number", "null"]
+        tp3:
+          type: ["number", "null"]
+        tsl:
+          type: ["number", "null"]
+        t1_hit:
+          type: boolean
+        t2_hit:
+          type: boolean
+        t3_hit:
+          type: boolean
+        setup:
+          type: string
+        score:
+          type: ["number", "null"]
+      required:
+        - direction
+        - t1_hit
+        - t2_hit
+        - t3_hit
+    ChartResponse:
+      type: object
+      properties:
+        symbol:
+          type: string
+        timeframe:
+          type: string
+        candles:
+          type: array
+          items:
+            $ref: "#/components/schemas/Candle"
+        signals:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChartSignalMarker"
+        current_price:
+          type: ["number", "null"]
+        active_trade:
+          oneOf:
+            - $ref: "#/components/schemas/ChartActiveTrade"
+            - type: "null"
+        scan_run_at:
+          type: ["string", "null"]
+      required:
+        - symbol
+        - timeframe
+        - candles
+        - signals
+    StatsResponse:
+      type: object
+      properties:
+        total_symbols:
+          type: integer
+        active_trades:
+          type: integer
+        pending_signals:
+          type: integer
+        buy_signals:
+          type: integer
+        sell_signals:
+          type: integer
+        last_scan:
+          type: ["string", "null"]
+        scanning:
+          type: boolean
+        scan_errors:
+          type: integer
+        timeframes:
+          type: array
+          items:
+            type: string
+        session_status:
+          type: string
+          description: "OPEN | PRE_OPEN | CLOSED | HOLIDAY | WEEKEND"
+        market_open:
+          type: boolean
+        nse_time:
+          type: string
+        next_open:
+          type: ["string", "null"]
+        next_close:
+          type: ["string", "null"]
+      required:
+        - total_symbols
+        - active_trades
+        - pending_signals
+        - buy_signals
+        - sell_signals
+        - scanning
+        - scan_errors
+        - timeframes
+        - session_status
+        - market_open
+        - nse_time
+    SymbolsResponse:
+      type: object
+      properties:
+        symbols:
+          type: array
+          items:
+            type: string
+        timeframes:
+          type: array
+          items:
+            type: string
+      required:
+        - symbols
+        - timeframes
+    ScanTriggerResponse:
+      type: object
+      properties:
+        message:
+          type: string
+        scan_id:
+          type: string
+      required:
+        - message
+        - scan_id
