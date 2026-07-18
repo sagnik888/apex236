@@ -250,6 +250,14 @@ components:
         intraday_or_swing:
           type: string
           description: "Intraday (15m/1h) or Swing (4h/1d)"
+        sector:
+          type: string
+        relative_volume:
+          type: ["number", "null"]
+        sl_distance_pct:
+          type: ["number", "null"]
+        transition:
+          type: string
         daily_move_pct:
           type: ["number", "null"]
           description: "Today's price move from market open (%)"

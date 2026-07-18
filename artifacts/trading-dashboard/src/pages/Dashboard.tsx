@@ -13,31 +13,116 @@ function SortIcon({ col, active, dir }: { col: string; active: string; dir: Sort
   return dir === "asc" ? <ChevronUp className="h-3 w-3 text-primary" /> : <ChevronDown className="h-3 w-3 text-primary" />;
 }
 
+function getRegimeStyle(value?: string) {
+  if (!value) return { bg: "bg-muted/30", fg: "text-muted-foreground", border: "border-border", letter: "-" };
+  const isBull = value.includes("T+");
+  const isBear = value.includes("T-");
+  const isVol = value.includes("V") || value.includes("v");
+
+  if (isBull && isVol) {
+    return { bg: "bg-blue-500/20", fg: "text-blue-400 font-bold", border: "border-blue-500/40 shadow-[0_0_6px_rgba(59,130,246,0.3)]", letter: "V+" };
+  }
+  if (isBear && isVol) {
+    return { bg: "bg-yellow-500/20", fg: "text-yellow-400 font-bold", border: "border-yellow-500/40 shadow-[0_0_6px_rgba(234,179,8,0.3)]", letter: "V-" };
+  }
+  if (isBull) {
+    return { bg: "bg-signal-buy/20", fg: "text-signal-buy font-bold", border: "border-signal-buy/30", letter: "B" };
+  }
+  if (isBear) {
+    return { bg: "bg-signal-sell/20", fg: "text-signal-sell font-bold", border: "border-signal-sell/30", letter: "S" };
+  }
+  return { bg: "bg-gray-500/20", fg: "text-gray-400 font-bold", border: "border-gray-500/30", letter: "R" };
+}
+
 function RegimeBox({ value, label, activeStatus }: { value?: string; label: string; activeStatus?: string }) {
   const lineClass = activeStatus === "PROFIT" ? "bg-signal-buy" : activeStatus === "LOSS" ? "bg-signal-sell" : "bg-white";
+  const { bg, fg, border, letter } = getRegimeStyle(value);
 
   if (!value) return (
-    <div className="w-5 h-5 bg-muted/30 rounded border border-border flex items-center justify-center text-[8px] text-muted-foreground opacity-50 relative">
+    <div className="w-6 h-5 bg-muted/30 rounded border border-border flex items-center justify-center text-[8px] text-muted-foreground opacity-50 relative" title={label}>
       {label}
       {activeStatus && <div className={`absolute -bottom-1 left-[1px] right-[1px] h-[2px] ${lineClass} rounded-full`} />}
     </div>
   );
-  const isBull = value.includes("T+");
-  const isBear = value.includes("T-");
-  const isVol = value.includes("V") || value.includes("v");
-  
-  const bg = isVol ? "bg-blue-500/20" : isBull ? "bg-signal-buy/20" : isBear ? "bg-signal-sell/20" : "bg-gray-500/20";
-  const fg = isVol ? "text-blue-500" : isBull ? "text-signal-buy" : isBear ? "text-signal-sell" : "text-gray-500";
-  const border = isVol ? "border-blue-500/30" : isBull ? "border-signal-buy/30" : isBear ? "border-signal-sell/30" : "border-gray-500/30";
-  
+
   return (
-    <div className={`w-5 h-5 rounded border flex items-center justify-center text-[9px] font-bold relative ${bg} ${fg} ${border}`} title={`${label}: ${value}`}>
-      {isVol ? "V" : isBull ? "B" : isBear ? "S" : "R"}
+    <div className={`w-6 h-5 rounded border flex items-center justify-center text-[9px] relative ${bg} ${fg} ${border}`} title={`${label}: ${value}`}>
+      {letter}
       {activeStatus && (
         <div className={`absolute -bottom-[3px] left-[1px] right-[1px] h-[2px] ${lineClass} rounded-full shadow-sm`} />
       )}
     </div>
   );
+}
+
+type MoodType = "high-bull" | "high-bear" | "bullish" | "bearish" | "neutral";
+
+interface MoodInfo {
+  mood: MoodType;
+  label: string;
+  badgeClass: string;
+  textClass: string;
+  rowClass: string;
+  borderClass: string;
+}
+
+function getRegimeMoodInfo(row: any): MoodInfo {
+  const tf = row.timeframe || "15m";
+  const regimeStr = (row[`regime_${tf}`] || row.regime_15m || "") as string;
+  
+  const isBull = regimeStr.includes("T+") || row.direction === "BUY";
+  const isBear = regimeStr.includes("T-") || row.direction === "SELL";
+  const isHighMom = regimeStr.includes("V") || regimeStr.includes("v") || (row.adx != null && row.adx >= 25 && (regimeStr.includes("T+") || regimeStr.includes("T-")));
+  const isRanging = regimeStr.includes("R") || (row.adx != null && row.adx < 20);
+
+  if (isBull && isHighMom && !isRanging) {
+    return {
+      mood: "high-bull",
+      label: "High Bull Momentum",
+      badgeClass: "bg-blue-500/20 text-blue-400 border border-blue-500/40 shadow-[0_0_8px_rgba(59,130,246,0.25)]",
+      textClass: "text-blue-400 font-bold",
+      rowClass: "bg-blue-500/[0.04] hover:bg-blue-500/[0.12]",
+      borderClass: "border-l-4 border-l-blue-400",
+    };
+  }
+  if (isBear && isHighMom && !isRanging) {
+    return {
+      mood: "high-bear",
+      label: "High Bear Momentum",
+      badgeClass: "bg-yellow-500/20 text-yellow-400 border border-yellow-500/40 shadow-[0_0_8px_rgba(234,179,8,0.25)]",
+      textClass: "text-yellow-400 font-bold",
+      rowClass: "bg-yellow-500/[0.04] hover:bg-yellow-500/[0.12]",
+      borderClass: "border-l-4 border-l-yellow-400",
+    };
+  }
+  if (isBull && !isRanging) {
+    return {
+      mood: "bullish",
+      label: "Bullish Trend",
+      badgeClass: "bg-signal-buy/20 text-signal-buy border border-signal-buy/30",
+      textClass: "text-signal-buy font-semibold",
+      rowClass: "bg-signal-buy/[0.03] hover:bg-signal-buy/[0.10]",
+      borderClass: "border-l-4 border-l-signal-buy",
+    };
+  }
+  if (isBear && !isRanging) {
+    return {
+      mood: "bearish",
+      label: "Bearish Trend",
+      badgeClass: "bg-signal-sell/20 text-signal-sell border border-signal-sell/30",
+      textClass: "text-signal-sell font-semibold",
+      rowClass: "bg-signal-sell/[0.03] hover:bg-signal-sell/[0.10]",
+      borderClass: "border-l-4 border-l-signal-sell",
+    };
+  }
+  return {
+    mood: "neutral",
+    label: "Neutral / Ranging",
+    badgeClass: "bg-gray-500/20 text-gray-300 border border-gray-500/30",
+    textClass: "text-gray-400 font-medium",
+    rowClass: "bg-muted/5 hover:bg-muted/20",
+    borderClass: "border-l-4 border-l-gray-600/50",
+  };
 }
 
 function formatSignalTime(ts: string | unknown): string {
@@ -112,10 +197,13 @@ export default function Dashboard() {
         // but user asked for intraday vs swing vs both. 
         // Our engine returns "Intraday", "Swing", "BTST", "STBT".
         const type = (s as any).intraday_or_swing || "";
+        const transition = (s as any).transition || "";
         if (tradeTypeFilter === "INTRADAY") {
-          return type === "Intraday";
+          return type === "Intraday" && transition !== "BTST";
         } else if (tradeTypeFilter === "SWING") {
           return type !== "Intraday"; // Swing, BTST, STBT
+        } else if (tradeTypeFilter === "BTST") {
+          return transition === "BTST";
         }
         return true;
       });
@@ -201,7 +289,8 @@ export default function Dashboard() {
             {[
               { label: "Both", value: "ALL" },
               { label: "Intraday", value: "INTRADAY" },
-              { label: "Swing", value: "SWING" }
+              { label: "Swing", value: "SWING" },
+              { label: "BTST", value: "BTST" }
             ].map(d => (
               <button
                 key={d.value}
@@ -238,21 +327,21 @@ export default function Dashboard() {
       </div>
 
       {/* Market Breadth Widget */}
-      {stats?.market_breadth && (
+      {(stats as any)?.market_breadth && (
         <div className="flex items-center gap-2 p-2 mx-4 mt-4 bg-muted/30 border border-border rounded-lg text-sm shrink-0">
           <div className="font-semibold px-2">NIFTY 100 Breadth:</div>
           <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden flex">
             <div 
               className="h-full bg-signal-buy transition-all" 
-              style={{ width: `${stats.market_breadth.bullish_pct}%` }} 
+              style={{ width: `${(stats as any).market_breadth.bullish_pct}%` }} 
             />
             <div 
               className="h-full bg-signal-sell transition-all" 
-              style={{ width: `${stats.market_breadth.bearish_pct}%` }} 
+              style={{ width: `${(stats as any).market_breadth.bearish_pct}%` }} 
             />
           </div>
-          <div className="text-xs font-mono text-signal-buy px-2">{stats.market_breadth.bullish_pct}% Bullish</div>
-          <div className="text-xs font-mono text-signal-sell px-2">{stats.market_breadth.bearish_pct}% Bearish</div>
+          <div className="text-xs font-mono text-signal-buy px-2">{(stats as any).market_breadth.bullish_pct}% Bullish</div>
+          <div className="text-xs font-mono text-signal-sell px-2">{(stats as any).market_breadth.bearish_pct}% Bearish</div>
         </div>
       )}
 
@@ -300,15 +389,30 @@ export default function Dashboard() {
                   const dailyMove = row.daily_move_pct as number | null | undefined;
                   const etaHrs = row.eta_hrs as number | null | undefined;
 
+                  const moodInfo = getRegimeMoodInfo(row);
+
                   return (
                     <tr
                       key={`${row.symbol}-${row.timeframe}-${i}`}
-                      className="hover:bg-muted/50 transition-colors cursor-pointer group"
+                      className={`transition-colors cursor-pointer group ${moodInfo.rowClass} ${moodInfo.borderClass}`}
                       onClick={() => setLocation(`/chart/${row.symbol}/${row.timeframe}`)}
                     >
                       {/* Symbol */}
-                      <td className="px-4 py-2.5 font-bold font-mono">
-                        {row.symbol}
+                      <td className="px-4 py-2.5">
+                        <div className="flex flex-col gap-0.5">
+                          <span className="flex items-center gap-1.5 font-bold font-mono">
+                            {row.symbol}
+                            {(row as any).transition === "BTST" && (
+                              <span className="bg-yellow-500/20 text-yellow-500 text-[9px] font-bold px-1 rounded uppercase tracking-wider">BTST</span>
+                            )}
+                          </span>
+                          <div className="flex items-center gap-1.5 text-[9px] font-normal tracking-wide">
+                            <span className="text-muted-foreground">{(row as any).sector || "NSE"}</span>
+                            {(row as any).relative_volume && (row as any).relative_volume > 1.5 && (
+                              <span className="text-orange-400 font-medium whitespace-nowrap">🔥 {(row as any).relative_volume.toFixed(1)}x Vol</span>
+                            )}
+                          </div>
+                        </div>
                       </td>
 
                       {/* TF + Intraday/Swing */}
@@ -366,7 +470,7 @@ export default function Dashboard() {
                       {/* Entry (Time) */}
                       <td className="px-4 py-2.5 text-right flex flex-col items-end gap-0.5">
                         <span className="font-mono text-xs tabular-nums text-foreground">
-                          {row.entry_price != null && row.entry_price > 0 ? row.entry_price.toFixed(2) : "—"}
+                          {row.entry_price != null && Number(row.entry_price) > 0 ? Number(row.entry_price).toFixed(2) : "—"}
                         </span>
                         <span className="font-mono text-[10px] text-muted-foreground">
                           {formatSignalTime(row.signal_time)}
@@ -375,7 +479,12 @@ export default function Dashboard() {
 
                       {/* SL1 */}
                       <td className="px-4 py-2.5 font-mono text-xs text-signal-sell/80 tabular-nums">
-                        {row.sl1 != null ? row.sl1.toFixed(2) : "—"}
+                        <div className="flex flex-col gap-0.5">
+                          <span>{row.sl1 != null ? row.sl1.toFixed(2) : "—"}</span>
+                          {(row as any).sl_distance_pct != null && (
+                            <span className="text-[10px] text-red-400/80">(-{(row as any).sl_distance_pct.toFixed(1)}%)</span>
+                          )}
+                        </div>
                       </td>
 
                       {/* TP1 */}
@@ -399,36 +508,54 @@ export default function Dashboard() {
 
                       {/* Regime MTF */}
                       <td className="px-4 py-2.5">
-                        <div className="flex gap-1 items-center pb-[3px]">
-                          <RegimeBox value={row.regime_15m as string} label="15m" activeStatus={(row.active_timeframes as Record<string, string>)?.[`15m`]} />
-                          <RegimeBox value={row.regime_1h as string} label="1h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1h`]} />
-                          <RegimeBox value={row.regime_4h as string} label="4h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`4h`]} />
-                          <RegimeBox value={row.regime_1d as string} label="1d" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1d`]} />
+                        <div className="flex flex-col gap-1 items-start">
+                          <div className="flex gap-1 items-center pb-[1px]">
+                            <RegimeBox value={row.regime_15m as string} label="15m" activeStatus={(row.active_timeframes as Record<string, string>)?.[`15m`]} />
+                            <RegimeBox value={row.regime_1h as string} label="1h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1h`]} />
+                            <RegimeBox value={row.regime_4h as string} label="4h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`4h`]} />
+                            <RegimeBox value={row.regime_1d as string} label="1d" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1d`]} />
+                          </div>
+                          <span className={`text-[9px] px-1.5 py-0.5 rounded border uppercase tracking-wider font-bold ${moodInfo.badgeClass}`}>
+                            {moodInfo.label}
+                          </span>
                         </div>
                       </td>
 
                       {/* Setup */}
                       <td className="px-4 py-2.5">
-                        <span className="px-1.5 py-0.5 bg-accent text-accent-foreground text-[10px] font-mono rounded whitespace-nowrap">
-                          {row.setup || "—"}
-                        </span>
+                        <div className="flex flex-col gap-0.5 items-start">
+                          <span className="px-1.5 py-0.5 bg-accent text-accent-foreground text-[10px] font-mono rounded whitespace-nowrap">
+                            {row.setup || "—"}
+                          </span>
+                          {(row as any).win_rate_pct != null && (
+                            <span className="text-[9px] text-muted-foreground font-semibold">{(row as any).win_rate_pct.toFixed(0)}% WR</span>
+                          )}
+                        </div>
                       </td>
 
                       {/* RSI */}
-                      <td className="px-4 py-2.5 font-mono text-xs text-right text-muted-foreground tabular-nums">
-                        <span className={
-                          row.rsi != null && row.rsi > 70 ? "text-signal-sell" :
-                          row.rsi != null && row.rsi < 30 ? "text-signal-buy" : ""
-                        }>
-                          {row.rsi != null ? row.rsi.toFixed(1) : "—"}
-                        </span>
+                      <td className="px-4 py-2.5 font-mono text-xs text-right tabular-nums">
+                        {row.rsi != null ? (
+                          <div className="flex items-center justify-end gap-1.5">
+                            {row.rsi > 70 && <span className="px-1 py-0.5 bg-signal-sell/20 text-signal-sell border border-signal-sell/40 rounded text-[9px] font-bold uppercase">OB</span>}
+                            {row.rsi < 30 && <span className="px-1 py-0.5 bg-signal-buy/20 text-signal-buy border border-signal-buy/40 rounded text-[9px] font-bold uppercase">OS</span>}
+                            <span className={`px-2 py-0.5 rounded border font-semibold ${moodInfo.badgeClass}`}>
+                              {row.rsi.toFixed(1)}
+                            </span>
+                          </div>
+                        ) : <span className="text-muted-foreground">—</span>}
                       </td>
 
                       {/* ADX */}
-                      <td className="px-4 py-2.5 font-mono text-xs text-right text-muted-foreground tabular-nums">
-                        <span className={row.adx != null && row.adx > 25 ? "text-yellow-400" : ""}>
-                          {row.adx != null ? row.adx.toFixed(1) : "—"}
-                        </span>
+                      <td className="px-4 py-2.5 font-mono text-xs text-right tabular-nums">
+                        {row.adx != null ? (
+                          <div className="flex items-center justify-end gap-1.5">
+                            {row.adx >= 25 && <span className="px-1 py-0.5 bg-foreground/10 text-foreground text-[9px] font-bold rounded uppercase">STR</span>}
+                            <span className={`px-2 py-0.5 rounded border font-semibold ${moodInfo.badgeClass}`}>
+                              {row.adx.toFixed(1)}
+                            </span>
+                          </div>
+                        ) : <span className="text-muted-foreground">—</span>}
                       </td>
 
                       {/* State */}

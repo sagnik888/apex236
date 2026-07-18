@@ -8,6 +8,9 @@ export type NotifType =
   | "trade_triggered"
   | "target_hit"
   | "sl_hit"
+  | "tsl_update"
+  | "tsl_hit"
+  | "trade_transition"
   | "scan_complete";
 
 export interface Notification {

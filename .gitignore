@@ -47,3 +47,14 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Python & Logs
+__pycache__/
+*.pyc
+*.log
+*.sqlite
+*.db
+response.json
+*test_chart_output.json
+artifacts/api-server/python_scanner/debug_*.py
+artifacts/api-server/python_scanner/test_*.py

@@ -1,4 +1,4 @@
-"""APEX Nifty 50 Scanner — FastAPI main entry point."""
+"""APEX Nifty 236 Scanner — FastAPI main entry point."""
 from __future__ import annotations
 
 import asyncio
@@ -9,14 +9,28 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from scanner_engine import ScannerEngine, get_market_status, scan_interval_secs, ist_now
 
+# Configure logging
+log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
+log_level = getattr(logging, log_level_str, logging.INFO)
+log_file = os.getenv("LOG_FILE", None)
+
+handlers = [logging.StreamHandler()]
+if log_file:
+    handlers.append(logging.FileHandler(log_file))
+
 logging.basicConfig(
-    level=logging.INFO,
+    level=log_level,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=handlers,
 )
 logger = logging.getLogger("apex")
 
@@ -102,12 +116,16 @@ async def lifespan(app: FastAPI):
         pass
 
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
-    title="APEX Nifty 50 Scanner",
-    description="Real-time algorithmic trading scanner for all 50 Nifty stocks",
+    title="APEX Nifty 236 Scanner",
+    description="Real-time algorithmic trading scanner for all 236 Nifty stocks",
     version="2.0.0",
     lifespan=lifespan,
 )
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 app.add_middleware(
     CORSMiddleware,
@@ -119,7 +137,8 @@ app.add_middleware(
 
 
 @app.get("/api/healthz")
-def health_check():
+@limiter.limit("60/minute")
+def health_check(request: Request):
     stats = engine.get_stats()
     return {
         "status":    "ok",
@@ -130,7 +149,8 @@ def health_check():
 
 
 @app.get("/api/session")
-def get_session():
+@limiter.limit("30/minute")
+def get_session(request: Request):
     """Current NSE market session status."""
     ms = get_market_status()
     return {
@@ -142,7 +162,9 @@ def get_session():
 
 
 @app.get("/api/signals")
+@limiter.limit("30/minute")
 def get_signals(
+    request: Request,
     timeframe: Optional[str] = Query(None, description="Filter: 15m | 1h | 4h | 1d"),
     direction: Optional[str] = Query(None, description="Filter: BUY | SELL"),
 ):
@@ -150,34 +172,50 @@ def get_signals(
 
 
 @app.get("/api/trades")
-def get_trades():
+@limiter.limit("30/minute")
+def get_trades(request: Request):
     return engine.get_active_trades()
 
 
 @app.get("/api/leaderboard")
+@limiter.limit("30/minute")
 def get_leaderboard(
+    request: Request,
     timeframe: Optional[str] = Query(None, description="Filter: 15m | 1h | 4h | 1d"),
 ):
     return engine.get_leaderboard(timeframe=timeframe)
 
 
 @app.get("/api/chart/{symbol}/{timeframe}")
-def get_chart(symbol: str, timeframe: str):
+@limiter.limit("15/minute")
+def get_chart(request: Request, symbol: str, timeframe: str):
     return engine.get_chart_data(symbol, timeframe)
 
 
 @app.get("/api/stats")
-def get_stats():
+@limiter.limit("30/minute")
+def get_stats(request: Request):
     return engine.get_stats()
 
 
+@app.get("/api/analytics")
+@limiter.limit("30/minute")
+def get_analytics(
+    request: Request,
+    tenure: Optional[str] = Query("30d", description="Filter tenure: 1d | 7d | 30d | 90d | 180d | 365d"),
+):
+    return engine.get_analytics(tenure=tenure)
+
+
 @app.get("/api/symbols")
-def get_symbols():
+@limiter.limit("10/minute")
+def get_symbols(request: Request):
     return engine.get_symbols()
 
 
 @app.post("/api/scan")
-async def trigger_scan():
+@limiter.limit("5/minute")
+async def trigger_scan(request: Request):
     """Trigger a fresh scan asynchronously."""
     loop = asyncio.get_running_loop()
 
@@ -216,4 +254,4 @@ async def ws_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False, log_level="info")
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True, log_level="info")

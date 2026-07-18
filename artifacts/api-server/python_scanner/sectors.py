@@ -1,0 +1,25 @@
+def get_sector(symbol: str) -> str:
+    s = symbol.upper().replace(".NS", "").replace(".BO", "")
+    if "BANK" in s or s in ("HDFC", "SBI", "ICICI", "AXIS", "KOTAK", "INDUSIND", "PNB", "BOB", "CANBK", "AUBANK", "FEDERALBNK", "IDFCFIRSTB"): 
+        return "BANK"
+    if s in ("TCS", "INFY", "WIPRO", "HCLTECH", "TECHM", "LTIM", "MPHASIS", "COFORGE", "PERSISTENT"): 
+        return "IT"
+    if "AUTO" in s or s in ("MARUTI", "M&M", "TATAMOTORS", "BAJAJ-AUTO", "HEROMOTOCO", "EICHERMOT", "TVSMOTOR", "ASHOKLEY", "BOSCHLTD", "SONACOMS"): 
+        return "AUTO"
+    if "PHARMA" in s or s in ("SUNPHARMA", "CIPLA", "DRREDDY", "DIVISLAB", "LUPIN", "AUROPHARMA", "ZYDUSLIFE", "TORNTPHARM", "ALKEM", "BIOCON"): 
+        return "PHARMA"
+    if s in ("RELIANCE", "ONGC", "NTPC", "POWERGRID", "COALINDIA", "IOC", "BPCL", "TATAPOWER", "ADANIGREEN", "ADANIENSOL"): 
+        return "ENERGY"
+    if s in ("TATASTEEL", "HINDALCO", "JSWSTEEL", "VEDL", "JINDALSTEL", "NMDC"): 
+        return "METAL"
+    if s in ("ITC", "HINDUNILVR", "NESTLEIND", "BRITANNIA", "TATACONSUM", "DABUR", "GODREJCP", "MARICO", "COLPAL", "VBL", "UBL"): 
+        return "FMCG"
+    if "FIN" in s or s in ("BAJFINANCE", "BAJAJFINSV", "CHOLAFIN", "MUTHOOTFIN", "SHRIRAMFIN", "PFC", "RECLTD", "IREDA", "ABCAPITAL", "NUVAMA"): 
+        return "FINANCE"
+    if s in ("LT", "ULTRACEMCO", "GRASIM", "AMBUJACEM", "SHREECEM", "ACC", "DLF", "LODHA", "PRESTIGE", "GODREJPROP", "OBEROIRLTY", "MACROTECH"): 
+        return "INFRA/REALTY"
+    if s in ("TITAN", "TRENT", "ZOMATO", "NYKAA", "PAYTM", "PBFINTECH", "DELHIVERY", "VMM"):
+        return "CONSUMER/TECH"
+    if s in ("ADANIENT", "ADANIPORTS", "BHEL", "BEL", "HAL", "BDL", "MAZDOCK", "COCHINSHIP"):
+        return "DEFENSE/INDUSTRIALS"
+    return "NSE"

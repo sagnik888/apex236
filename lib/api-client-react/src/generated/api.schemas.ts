@@ -73,6 +73,12 @@ export interface Signal {
   live_rr?: number | null;
   /** Intraday (15m/1h) or Swing (4h/1d) */
   intraday_or_swing: string;
+  sector?: string;
+  /** @nullable */
+  relative_volume?: number | null;
+  /** @nullable */
+  sl_distance_pct?: number | null;
+  transition?: string;
   /**
      * Today's price move from market open (%)
      * @nullable

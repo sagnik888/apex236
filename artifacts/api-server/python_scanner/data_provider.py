@@ -95,6 +95,7 @@ def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
 
     now = time.time()
     cache_key = (symbol, timeframe)
+    ticker = None
     
     # Try batch cache first
     raw = None
@@ -119,19 +120,21 @@ def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     if raw is None or raw.empty:
         return None
 
-    try:
-        last_price = ticker.fast_info.get("last_price")
-        if not last_price:
-            last_price = ticker.fast_info.get("lastPrice")
-            
-        if last_price and last_price > 0:
-            raw.iloc[-1, raw.columns.get_loc("Close")] = last_price
-            if last_price > raw.iloc[-1, raw.columns.get_loc("High")]:
-                raw.iloc[-1, raw.columns.get_loc("High")] = last_price
-            if last_price < raw.iloc[-1, raw.columns.get_loc("Low")]:
-                raw.iloc[-1, raw.columns.get_loc("Low")] = last_price
-    except Exception as exc:
-        logger.debug(f"Could not fetch real-time LTP for {symbol}: {exc}")
+    # Only inject real-time LTP when fetching a single ticker directly outside of batch cache
+    if ticker is not None:
+        try:
+            last_price = ticker.fast_info.get("last_price")
+            if not last_price:
+                last_price = ticker.fast_info.get("lastPrice")
+                
+            if last_price and last_price > 0:
+                raw.iloc[-1, raw.columns.get_loc("Close")] = last_price
+                if last_price > raw.iloc[-1, raw.columns.get_loc("High")]:
+                    raw.iloc[-1, raw.columns.get_loc("High")] = last_price
+                if last_price < raw.iloc[-1, raw.columns.get_loc("Low")]:
+                    raw.iloc[-1, raw.columns.get_loc("Low")] = last_price
+        except Exception as exc:
+            logger.debug(f"Could not fetch real-time LTP for {symbol}: {exc}")
 
     df = raw.rename(columns={
         "Open": "open", "High": "high", "Low": "low",

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Activity, LayoutDashboard, PieChart, Circle } from "lucide-react";
+import { Activity, LayoutDashboard, PieChart, Circle, BarChart3 } from "lucide-react";
 import { useGetScannerStats, useGetSession } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { NotificationBell, NotificationToasts } from "@/components/notifications/NotificationCenter";
@@ -89,6 +89,15 @@ export function Shell({ children }: { children: React.ReactNode }) {
             >
               <PieChart className="h-4 w-4" />
               <span className="hidden sm:block">Active Trades</span>
+            </Link>
+            <Link
+              href="/analytics"
+              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                location === "/analytics" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              <BarChart3 className="h-4 w-4" />
+              <span className="hidden sm:block">Performance</span>
             </Link>
           </nav>
         </div>

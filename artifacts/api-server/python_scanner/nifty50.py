@@ -1,4 +1,4 @@
-NIFTY50_SYMBOLS = [
+NIFTY236_SYMBOLS = [
     "360ONE.NS",
     "AARTIIND.NS",
     "ABB.NS",

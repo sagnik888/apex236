@@ -61,7 +61,7 @@ export default function ChartView() {
   const safeSymbol    = symbol    || "NIFTY";
   const safeTimeframe = timeframe || "15m";
 
-  const { data: chartData, isLoading } = useGetChart(safeSymbol, safeTimeframe, {
+  const { data: chartData, isLoading, error } = useGetChart(safeSymbol, safeTimeframe, {
     query: { refetchInterval: 30000, queryKey: ["/api/chart", safeSymbol, safeTimeframe] },
   });
 
@@ -140,15 +140,23 @@ export default function ChartView() {
 
     // Signal markers — price is now correctly set in backend
     if (chartData.signals?.length) {
+      const seenMarkerTimes = new Set<number>();
       const markers: SeriesMarker<Time>[] = chartData.signals
         .map(s => ({
           time:     s.time as Time,
           position: s.type === "BUY" ? "belowBar" as const : "aboveBar" as const,
           color:    s.type === "BUY" ? "#00FF66" : "#FF3366",
           shape:    s.type === "BUY" ? "arrowUp"  as const : "arrowDown" as const,
-          text:     `${s.type}${s.score ? " " + s.score.toFixed(0) : ""}`,
+          text:     `${s.type}${s.score != null ? " " + Number(s.score).toFixed(0) : ""}`,
           size:     2,
         }))
+        .filter(m => {
+          const t = m.time as number;
+          if (!seen.has(t)) return false; // Must exist in candles data!
+          if (seenMarkerTimes.has(t)) return false; // Must be strictly unique!
+          seenMarkerTimes.add(t);
+          return true;
+        })
         .sort((a, b) => (a.time as number) - (b.time as number));
 
       try { markersRef.current = createSeriesMarkers(series, markers); } catch (e) { console.error("markers:", e); }
@@ -214,17 +222,21 @@ export default function ChartView() {
       </div>
 
       <div className="flex-1 flex overflow-hidden relative">
-        {isLoading && !chartData && (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/80 backdrop-blur-sm">
-            <div className="flex flex-col items-center">
-              <Activity className="h-8 w-8 text-primary animate-pulse mb-3" />
-              <p className="font-mono text-sm text-muted-foreground">Loading chart data...</p>
+        <div className="flex-1 relative bg-background">
+          <div className="absolute inset-0" ref={chartContainerRef} />
+          
+          {isLoading && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center text-muted-foreground text-sm font-mono bg-background/80 backdrop-blur-sm">
+              Loading chart data...
             </div>
-          </div>
-        )}
-
-        {/* Chart canvas */}
-        <div className="flex-1 relative" ref={chartContainerRef} />
+          )}
+          
+          {error && (
+            <div className="absolute inset-0 z-10 flex items-center justify-center text-destructive text-sm font-mono bg-background/80 backdrop-blur-sm">
+              Failed to load chart
+            </div>
+          )}
+        </div>
 
         {/* Side Panel */}
         <div className="w-72 border-l border-border bg-card flex flex-col shrink-0 overflow-auto">

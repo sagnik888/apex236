@@ -8,6 +8,7 @@ import { Shell } from '@/components/layout/Shell';
 
 import Dashboard from '@/pages/Dashboard';
 import Trades from '@/pages/Trades';
+import Analytics from '@/pages/Analytics';
 import ChartView from '@/pages/ChartView';
 
 const queryClient = new QueryClient();
@@ -27,6 +28,7 @@ function Router() {
       <Switch>
         <Route path="/" component={Dashboard} />
         <Route path="/trades" component={Trades} />
+        <Route path="/analytics" component={Analytics} />
         <Route path="/chart/:symbol/:timeframe" component={ChartView} />
         <Route component={NotFound} />
       </Switch>
