@@ -50,6 +50,7 @@ function addPriceLine(series: any, price: number | null | undefined, color: stri
 
 export default function ChartView() {
   const { symbol, timeframe } = useParams<{ symbol: string; timeframe: string }>();
+  const [_, setLocation] = useLocation();
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartRef    = useRef<IChartApi | null>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
