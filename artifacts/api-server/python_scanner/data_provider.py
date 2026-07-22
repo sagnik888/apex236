@@ -445,6 +445,11 @@ def get_data_health() -> dict:
         health["feed"] = get_feed().stats()
     except Exception:
         health["feed"] = None
+    try:
+        from broker_dispatcher import get_dispatcher
+        health["dispatcher"] = get_dispatcher().status()
+    except Exception:
+        health["dispatcher"] = None
     return health
 
 
@@ -458,25 +463,44 @@ def prefetch_all_ohlcv(symbols: list[str], timeframes: list[str]) -> None:
     angel_tfs = [tf for tf in timeframes if tf in ("15m", "1h", "4h")]
     yahoo_tfs = [tf for tf in timeframes if tf == "1d"]
 
-    if angel_tfs and _angel_enabled():
+    from broker_dispatcher import get_dispatcher
+    dispatcher = get_dispatcher()
+    splits = dispatcher.split_symbols(list(symbols))
+
+    if angel_tfs and _angel_enabled() and splits["angel"]:
         try:
-            if _ensure_tokens(list(symbols)):
-                _start_bootstrap(list(symbols), "15m", lookback_days=120)
+            angel_syms = splits["angel"]
+            if _ensure_tokens(angel_syms):
+                _start_bootstrap(angel_syms, "15m", lookback_days=120)
                 if any(tf in ("1h", "4h") for tf in angel_tfs):
-                    _start_bootstrap(list(symbols), "1h", lookback_days=360)
-                tokens = [_ANGEL_TOKENS[s]["token"] for s in symbols if s in _ANGEL_TOKENS]
+                    _start_bootstrap(angel_syms, "1h", lookback_days=360)
+                tokens = [_ANGEL_TOKENS[s]["token"] for s in angel_syms if s in _ANGEL_TOKENS]
                 from angel_feed import get_feed
                 get_feed().start(tokens)
                 if "15m" in angel_tfs and not _BOOTSTRAP_EVENTS["15m"].is_set():
                     logger.info("Waiting for Angel 15m bootstrap (first run only)…")
                     _BOOTSTRAP_EVENTS["15m"].wait(timeout=900)
-                _absorb_feed_candles(list(symbols))
-                _detect_gaps(list(symbols))
+                _absorb_feed_candles(angel_syms)
+                _detect_gaps(angel_syms)
         except Exception as exc:
             _disable_angel(f"prefetch failure: {exc}")
-            yahoo_tfs = timeframes  # full Yahoo fallback this pass
-    elif angel_tfs:
-        yahoo_tfs = timeframes
+            # If Angel fails, let Upstox / Yahoo handle them
+            splits["upstox"].extend(splits["angel"])
+
+    if angel_tfs and splits["upstox"]:
+        try:
+            from broker_upstox import get_upstox_client, credentials_available as upstox_ok
+            if upstox_ok():
+                client = get_upstox_client()
+                upstox_keys = []
+                for s in splits["upstox"]:
+                    info = client.resolve_symbol(s)
+                    if info and info.get("instrument_key"):
+                        upstox_keys.append(info["instrument_key"])
+                from upstox_feed import get_upstox_feed
+                get_upstox_feed().start(upstox_keys)
+        except Exception as exc:
+            logger.debug("Upstox prefetch setup failed: %s", exc)
 
     if yahoo_tfs:
         _yahoo_prefetch(symbols, yahoo_tfs)
@@ -487,14 +511,28 @@ def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     if timeframe not in _FETCH_CONFIG:
         raise ValueError(f"Unsupported timeframe: {timeframe!r}")
 
-    if timeframe in ("15m", "1h", "4h") and _angel_enabled():
+    from broker_dispatcher import get_dispatcher
+    dispatcher = get_dispatcher()
+
+    if timeframe in ("15m", "1h", "4h"):
+        # First check if Angel has cached/bootstrapped data ready when assigned or enabled
+        if _angel_enabled():
+            try:
+                frame = _angel_fetch(symbol, timeframe)
+                if frame is not None and len(frame) >= 50:
+                    _LAST_SCAN_SOURCE[(symbol, timeframe)] = "angel"
+                    return frame.copy()
+            except Exception as exc:
+                logger.debug("Angel cache check failed for %s/%s: %s", symbol, timeframe, exc)
+
+        # Delegate to MultiBrokerDispatcher failover (Upstox / Angel REST API)
         try:
-            frame = _angel_fetch(symbol, timeframe)
-            if frame is not None and len(frame) >= 50:
-                _LAST_SCAN_SOURCE[(symbol, timeframe)] = "angel"
-                return frame.copy()
+            df, source = dispatcher.fetch_ohlcv(symbol, timeframe)
+            if df is not None and len(df) >= 50:
+                _LAST_SCAN_SOURCE[(symbol, timeframe)] = source
+                return df.copy()
         except Exception as exc:
-            logger.warning("Angel fetch failed %s/%s (%s); using Yahoo", symbol, timeframe, exc)
+            logger.warning("Dispatcher fetch failed %s/%s (%s); using Yahoo", symbol, timeframe, exc)
 
     frame = _yahoo_fetch(symbol, timeframe)
     if frame is not None:

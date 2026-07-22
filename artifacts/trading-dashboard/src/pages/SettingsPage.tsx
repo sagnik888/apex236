@@ -31,6 +31,11 @@ type Settings = {
   use_session: boolean;
   block_open_noise: boolean;
   block_close_noise: boolean;
+  enable_options: boolean;
+  strike_mode: string;
+  trade_options_intraday: boolean;
+  options_broker: string;
+  options_stop_mode: string;
 };
 
 const ALL_TFS = ["15m", "1h", "4h", "1d"];
@@ -60,6 +65,11 @@ const DEFAULTS: Settings = {
   use_session: true,
   block_open_noise: false,
   block_close_noise: false,
+  enable_options: true,
+  strike_mode: "Smart Auto",
+  trade_options_intraday: true,
+  options_broker: "upstox",
+  options_stop_mode: "Delta-Translated",
 };
 
 async function fetchSettings(): Promise<Settings> {
@@ -320,6 +330,59 @@ export default function SettingsPage() {
               <Toggle checked={form.use_session} onChange={(v) => set("use_session", v)} label="Enable NSE session gate" />
               <Toggle checked={form.block_open_noise} onChange={(v) => set("block_open_noise", v)} label="Block 09:15–09:30 noise zone" disabled={!form.use_session} />
               <Toggle checked={form.block_close_noise} onChange={(v) => set("block_close_noise", v)} label="Block 15:00–15:30 close zone" disabled={!form.use_session} />
+            </div>
+          </Card>
+
+          <Card title="Multi-Broker & Options Engine (Upstox + Angel One)" desc="Configure 50/50 broker load balancing for equities and intraday ATM options (CE/PE) routing on Upstox.">
+            <div className="flex flex-col gap-4">
+              <Toggle
+                checked={form.enable_options}
+                onChange={(v) => set("enable_options", v)}
+                label="Enable Intraday Options Engine (CE / PE)"
+                desc="Dynamically resolve live Upstox NSE_FO contracts and trade options alongside or instead of cash equities."
+              />
+              <Toggle
+                checked={form.trade_options_intraday}
+                onChange={(v) => set("trade_options_intraday", v)}
+                label="Auto-Execute Options on Intraday Signals"
+                desc="Route 15m and 1h high-momentum signals to Upstox options orders automatically when execution mode is LIVE."
+                disabled={!form.enable_options}
+              />
+              <div className="flex flex-col gap-2">
+                <span className="text-xs text-muted-foreground">Strike Selection Mode</span>
+                <Segmented
+                  value={form.strike_mode as any}
+                  onChange={(v) => set("strike_mode", v)}
+                  options={[
+                    { v: "Smart Auto", label: "Smart Auto (Delta/ATM)" },
+                    { v: "Always ATM", label: "Always ATM" },
+                    { v: "Always OTM1", label: "OTM +1 Strike" },
+                    { v: "Always ITM1", label: "ITM +1 Strike" },
+                  ]}
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <span className="text-xs text-muted-foreground">Options Execution Broker</span>
+                <Segmented
+                  value={form.options_broker as any}
+                  onChange={(v) => set("options_broker", v)}
+                  options={[
+                    { v: "upstox", label: "Upstox (Primary FNO & API v2)" },
+                    { v: "angelone", label: "Angel One (Secondary)" },
+                  ]}
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <span className="text-xs text-muted-foreground">Option Stop-Loss & Risk Model</span>
+                <Segmented
+                  value={form.options_stop_mode as any}
+                  onChange={(v) => set("options_stop_mode", v)}
+                  options={[
+                    { v: "Delta-Translated", label: "Delta-Translated (Underlying Risk × Δ)" },
+                    { v: "Option ATR", label: "Option Contract ATR" },
+                  ]}
+                />
+              </div>
             </div>
           </Card>
         </div>

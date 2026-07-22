@@ -378,6 +378,69 @@ async def trigger_scan(request: Request):
     return {"message": "Scan triggered", "started": True, "scan_id": str(uuid.uuid4())}
 
 
+@app.get("/api/brokers/status")
+@limiter.limit("30/minute")
+def get_brokers_status(request: Request):
+    """Multi-broker load balancer status, rate limits, and Upstox/Angel health."""
+    from broker_dispatcher import get_dispatcher
+    from data_provider import get_data_health
+    return {
+        "dispatcher": get_dispatcher().status(),
+        "data_health": get_data_health(),
+    }
+
+
+@app.get("/api/options/resolve")
+@limiter.limit("30/minute")
+def get_resolved_option(
+    request: Request,
+    symbol: str = Query(..., description="Underlying symbol or index (e.g., ^NSEI, RELIANCE.NS)"),
+    spot_price: float = Query(..., gt=0, description="Current underlying spot price"),
+    direction: str = Query("LONG", description="LONG/BUY for CE, SHORT/SELL for PE"),
+    strike_offset: int = Query(0, description="Strike offset: 0=ATM, 1=OTM1, -1=ITM1"),
+):
+    """Dynamic resolution of active ATM/OTM/ITM NSE_FO option contracts via Upstox master."""
+    from options_engine import resolve_atm_option
+    contract = resolve_atm_option(symbol, spot_price, direction, strike_offset=strike_offset)
+    if not contract:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={"message": f"No active option contract found for {symbol} @ {spot_price}"},
+        )
+    return contract
+
+
+@app.post("/api/options/trade", dependencies=[Depends(_check_auth)])
+@limiter.limit("10/minute")
+async def post_option_trade(request: Request):
+    """Execute live option entry (CE/PE) directly via Upstox MultiBrokerDispatcher."""
+    from options_engine import execute_option_trade
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Body must be a JSON object")
+        required = ["underlying_symbol", "spot_price", "direction", "quantity", "stop_spot", "target_spot"]
+        for k in required:
+            if k not in body:
+                raise ValueError(f"Missing required parameter: {k!r}")
+        res = execute_option_trade(
+            underlying_symbol=str(body["underlying_symbol"]),
+            spot_price=float(body["spot_price"]),
+            direction=str(body["direction"]),
+            quantity=int(body["quantity"]),
+            stop_spot=float(body["stop_spot"]),
+            target_spot=float(body["target_spot"]),
+            timeframe=str(body.get("timeframe", "15m")),
+            stop_mode=str(body.get("stop_mode", "Delta-Translated")),
+            tag=str(body.get("tag", "")),
+        )
+        if not res["status"]:
+            return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content=res)
+        return res
+    except ValueError as exc:
+        return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
+
+
 @app.websocket("/api/ws")
 async def ws_endpoint(websocket: WebSocket):
     await websocket.accept()

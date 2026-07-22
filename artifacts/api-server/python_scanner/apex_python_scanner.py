@@ -104,9 +104,12 @@ class ApexConfig:
     close_noise_start: str = "15:00"
     timezone: str = IST
 
-    # Options guidance (underlying-price guidance only; not option pricing)
+    # Options guidance & trading engine (`options_engine.py`)
     enable_options: bool = True
     strike_mode: str = "Smart Auto"
+    trade_options_intraday: bool = True
+    options_broker: str = "upstox"
+    options_stop_mode: str = "Delta-Translated"
 
     # Pattern engine
     show_patterns: bool = True
@@ -758,7 +761,7 @@ def detect_instrument(symbol: str, override: str = "Auto-Detect", exchange: str 
         else:
             name = "Stock"
 
-    supports = name in {"Nifty 50", "Bank Nifty", "FinNifty", "Midcap"}
+    supports = name in {"Nifty 50", "Bank Nifty", "FinNifty", "Midcap", "Stock"}
     interval = 100.0 if name == "Bank Nifty" else 25.0 if name == "Midcap" else 50.0
     return InstrumentProfile(name=name, supports_index_options=supports, strike_interval=interval)
 
@@ -782,20 +785,38 @@ def select_option_strike(
 ) -> tuple[str, float]:
     if not config.enable_options or not profile.supports_index_options:
         return "", math.nan
-    atm = calculate_atm(underlying_price, profile.strike_interval)
+
+    offset = 0
     if config.strike_mode == "Always ATM":
-        strike = atm
+        offset = 0
     elif config.strike_mode == "Always OTM1":
-        strike = atm + profile.strike_interval if is_ce else atm - profile.strike_interval
+        offset = 1
     elif config.strike_mode == "Always ITM1":
-        strike = atm - profile.strike_interval if is_ce else atm + profile.strike_interval
+        offset = -1
     else:
         if confidence >= 85.0 and high_volatility and trending:
-            strike = atm + profile.strike_interval if is_ce else atm - profile.strike_interval
+            offset = 1
         elif confidence >= 70.0:
-            strike = atm
+            offset = 0
         else:
-            strike = atm - profile.strike_interval if is_ce else atm + profile.strike_interval
+            offset = 1
+
+    if config.trade_options_intraday:
+        try:
+            from options_engine import resolve_atm_option
+            contract = resolve_atm_option(
+                underlying_symbol=profile.name,
+                spot_price=underlying_price,
+                direction="LONG" if is_ce else "SHORT",
+                strike_offset=offset,
+            )
+            if contract and contract.get("strike"):
+                return ("CE" if is_ce else "PE"), float(contract["strike"])
+        except Exception:
+            pass
+
+    atm = calculate_atm(underlying_price, profile.strike_interval)
+    strike = atm + (offset * profile.strike_interval * (1 if is_ce else -1))
     return ("CE" if is_ce else "PE"), float(strike)
 
 
@@ -1974,6 +1995,44 @@ class ApexScanner:
         signal = str(row.get("signal", ""))
         signal_score = float(row.get("signal_score", math.nan))
         direction_score = float(max(row.get("bull_score", 0.0), row.get("bear_score", 0.0)))
+
+        opt_type = str(row.get("option_type", ""))
+        opt_strike = float(row.get("option_strike", math.nan))
+        opt_symbol = ""
+        opt_entry = math.nan
+        opt_sl1 = math.nan
+        opt_sl2 = math.nan
+        opt_tsl = math.nan
+        opt_tp1 = math.nan
+        opt_tp2 = math.nan
+        opt_tp3 = math.nan
+        if opt_type in ("CE", "PE") and not math.isnan(opt_strike) and opt_strike > 0:
+            s_str = f"{int(opt_strike)}" if opt_strike.is_integer() else f"{opt_strike:.1f}"
+            opt_symbol = f"{profile.name} {s_str} {opt_type}"
+            c_price = float(row.get("close", math.nan))
+            if not math.isnan(c_price) and c_price > 0:
+                diff = (c_price - opt_strike) if opt_type == "CE" else (opt_strike - c_price)
+                opt_entry = round(max(5.0, diff + c_price * 0.018 if diff > 0 else max(3.0, c_price * 0.018 - abs(diff) * 0.4)), 2)
+                delta = 0.52 if abs(diff) < (c_price * 0.01) else (0.65 if diff > 0 else 0.35)
+                cash_sl1 = active.sl1 if (active and not math.isnan(active.sl1)) else float(row.get("planned_sl1", math.nan))
+                cash_sl2 = active.sl2 if (active and not math.isnan(active.sl2)) else math.nan
+                cash_tsl = active.tsl if (active and not math.isnan(active.tsl)) else math.nan
+                cash_tp1 = active.tp1 if (active and not math.isnan(active.tp1)) else float(row.get("planned_tp1", math.nan))
+                cash_tp2 = active.tp2 if (active and not math.isnan(active.tp2)) else float(row.get("planned_tp2", math.nan))
+                cash_tp3 = active.tp3 if (active and not math.isnan(active.tp3)) else float(row.get("planned_tp3", math.nan))
+                if not math.isnan(cash_sl1):
+                    opt_sl1 = round(max(0.50, opt_entry - abs(c_price - cash_sl1) * delta), 2)
+                if not math.isnan(cash_sl2):
+                    opt_sl2 = round(max(0.50, opt_entry - abs(c_price - cash_sl2) * delta), 2)
+                if not math.isnan(cash_tsl):
+                    opt_tsl = round(max(0.50, opt_entry - abs(c_price - cash_tsl) * delta), 2)
+                if not math.isnan(cash_tp1):
+                    opt_tp1 = round(opt_entry + abs(cash_tp1 - c_price) * delta, 2)
+                if not math.isnan(cash_tp2):
+                    opt_tp2 = round(opt_entry + abs(cash_tp2 - c_price) * delta, 2)
+                if not math.isnan(cash_tp3):
+                    opt_tp3 = round(opt_entry + abs(cash_tp3 - c_price) * delta, 2)
+
         return {
             "symbol": symbol,
             "timestamp": pd.Timestamp(row.get("bar_close_time", row.name)),
@@ -1994,8 +2053,16 @@ class ApexScanner:
             "relative_volume": float(row.get("relative_volume", math.nan)),
             "volatility_regime": str(row.get("volatility_regime", "")),
             "session_ok": bool(row.get("session_ok", False)),
-            "option_type": str(row.get("option_type", "")),
-            "option_strike": float(row.get("option_strike", math.nan)),
+            "option_type": opt_type,
+            "option_strike": opt_strike,
+            "option_symbol": opt_symbol,
+            "option_entry": opt_entry,
+            "option_sl1": opt_sl1,
+            "option_sl2": opt_sl2,
+            "option_tsl": opt_tsl,
+            "option_tp1": opt_tp1,
+            "option_tp2": opt_tp2,
+            "option_tp3": opt_tp3,
             "exit_reason": str(row.get("exit_reason", "")),
             "planned_sl1": float(row.get("planned_sl1", math.nan)),
             "planned_tp1": float(row.get("planned_tp1", math.nan)),

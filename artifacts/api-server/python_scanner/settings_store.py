@@ -57,24 +57,30 @@ DEFAULTS: dict[str, Any] = {
     "slippage_pct": 0.1,
     "max_open_positions": 5,
     "max_per_sector": 2,
+    # Options Guidance & Intraday Trading Engine
+    "enable_options": True,
+    "strike_mode": "Smart Auto",
+    "trade_options_intraday": True,
+    "options_broker": "upstox",
+    "options_stop_mode": "Delta-Translated",
 }
 
-_RANGES = {
-    "fixed_sl_pct": (0.1, 10.0),
-    "atr_mult": (0.3, 5.0),
-    "t1_r": (0.2, 10.0),
-    "t2_r": (0.2, 15.0),
-    "t3_r": (0.2, 20.0),
-    "fixed_tp_pct": (0.1, 20.0),
+_RANGES: dict[str, tuple[float, float]] = {
     "min_score": (0.0, 100.0),
     "conflict_margin": (0.0, 100.0),
     "min_adx": (0.0, 100.0),
-    "signal_cooldown": (0, 100),
-    "trail_start_r": (0.0, 20.0),
-    "trail_mult": (0.1, 20.0),
-    "exit_confirmation_bars": (1, 20),
+    "signal_cooldown": (0.0, 50.0),
+    "fixed_sl_pct": (0.1, 10.0),
+    "atr_mult": (0.5, 10.0),
+    "t1_r": (0.5, 20.0),
+    "t2_r": (0.5, 30.0),
+    "t3_r": (0.5, 50.0),
+    "fixed_tp_pct": (0.1, 25.0),
+    "trail_start_r": (0.5, 20.0),
+    "trail_mult": (0.5, 10.0),
+    "exit_confirmation_bars": (1, 10),
     "max_consecutive_losses": (1, 20),
-    "circuit_pause_bars": (0, 500),
+    "circuit_pause_bars": (1, 50),
     "daily_max_loss_pct": (0.1, 20.0),
     "slippage_pct": (0.0, 5.0),
     "max_open_positions": (1, 100),
@@ -122,7 +128,19 @@ def validate(partial: dict[str, Any]) -> dict[str, Any]:
             if str(value).upper() not in ("PAPER", "LIVE"):
                 raise ValueError("execution_mode must be 'PAPER' or 'LIVE'")
             clean[key] = str(value).upper()
-        elif key in ("exit_at_t1", "use_trail", "use_htf", "lock_at_t1", "use_session", "block_open_noise", "block_close_noise"):
+        elif key == "strike_mode":
+            if value not in ("Smart Auto", "Always ATM", "Always OTM1", "Always ITM1"):
+                raise ValueError("strike_mode must be one of: Smart Auto, Always ATM, Always OTM1, Always ITM1")
+            clean[key] = str(value)
+        elif key == "options_broker":
+            if value not in ("upstox", "angelone"):
+                raise ValueError("options_broker must be 'upstox' or 'angelone'")
+            clean[key] = str(value)
+        elif key == "options_stop_mode":
+            if value not in ("Delta-Translated", "Option ATR"):
+                raise ValueError("options_stop_mode must be 'Delta-Translated' or 'Option ATR'")
+            clean[key] = str(value)
+        elif key in ("exit_at_t1", "use_trail", "use_htf", "lock_at_t1", "use_session", "block_open_noise", "block_close_noise", "enable_options", "trade_options_intraday"):
             clean[key] = bool(value)
         else:
             try:

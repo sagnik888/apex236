@@ -213,6 +213,16 @@ def build_configs() -> dict[str, ApexConfig]:
         cfg.use_session = bool(s["use_session"])
         cfg.block_open_noise = bool(s["block_open_noise"])
         cfg.block_close_noise = bool(s["block_close_noise"])
+        if "enable_options" in s:
+            cfg.enable_options = bool(s["enable_options"])
+        if "strike_mode" in s:
+            cfg.strike_mode = str(s["strike_mode"])
+        if "trade_options_intraday" in s:
+            cfg.trade_options_intraday = bool(s["trade_options_intraday"])
+        if "options_broker" in s:
+            cfg.options_broker = str(s["options_broker"])
+        if "options_stop_mode" in s:
+            cfg.options_stop_mode = str(s["options_stop_mode"])
         cfg.validate()
         configs[tf] = cfg
     return configs
@@ -967,6 +977,16 @@ class ScannerEngine:
                     "relative_volume": _safe(lt.get("relative_volume")),
                     "sl_distance_pct": sl_distance_pct,
                     "transition": transition,
+                    "option_type": str(lt.get("option_type", "")),
+                    "option_strike": _safe(lt.get("option_strike")),
+                    "option_symbol": str(lt.get("option_symbol", "")),
+                    "option_entry": _safe(lt.get("option_entry")),
+                    "option_sl1": _safe(lt.get("option_sl1")),
+                    "option_sl2": _safe(lt.get("option_sl2")),
+                    "option_tsl": _safe(lt.get("option_tsl")),
+                    "option_tp1": _safe(lt.get("option_tp1")),
+                    "option_tp2": _safe(lt.get("option_tp2")),
+                    "option_tp3": _safe(lt.get("option_tp3")),
                 })
 
         # Newest signal first, then highest score within identical timestamps.
@@ -1627,7 +1647,6 @@ class ScannerEngine:
                 if sig in ("BUY", "SELL"):
                     try:
                         sig_score = _safe(row.get("signal_score")) or 0.0
-                        # Fix: entry_price column may be 0; fall back to close
                         ep = _safe(row.get("entry_price"))
                         cp = _safe(row.get("close"))
                         price = (ep if ep and ep > 0 else cp) or 0.0
@@ -1647,27 +1666,87 @@ class ScannerEngine:
                         pass
 
         active_trade_info = None
-        if result.active_trade:
+        if result.active_trade or (result.latest.get("signal") in ("BUY", "SELL") and result.latest.get("option_type") in ("CE", "PE")):
             at = result.active_trade
-            # Normalise direction: LONG→BUY, SHORT→SELL
-            raw_dir = str(at.direction)
-            display_dir = "BUY" if raw_dir in ("LONG", "BUY") else "SELL"
+            lt = result.latest
+            if at:
+                raw_dir = str(at.direction)
+                display_dir = "BUY" if raw_dir in ("LONG", "BUY") else "SELL"
+                ep = _safe(at.entry_price)
+                et = _ts(at.entry_time)
+                st = _ts(at.signal_time)
+                s1 = _safe(at.sl1)
+                s2 = _safe(at.sl2)
+                t1 = _safe(at.tp1)
+                t2 = _safe(at.tp2)
+                t3 = _safe(at.tp3)
+                ts = _safe(at.tsl)
+                t1h = bool(at.t1_hit)
+                t2h = bool(at.t2_hit)
+                t3h = bool(at.t3_hit)
+                stp = str(at.setup) if hasattr(at, "setup") else ""
+                o_type = str(getattr(at, "option_type", "") or lt.get("option_type", ""))
+                o_strike = _safe(getattr(at, "option_strike", None) or lt.get("option_strike"))
+                o_sym = str(getattr(at, "option_symbol", "") or lt.get("option_symbol", ""))
+                o_entry = _safe(getattr(at, "option_entry", None) or lt.get("option_entry"))
+                o_sl1 = _safe(getattr(at, "option_sl1", None) or lt.get("option_sl1"))
+                o_sl2 = _safe(getattr(at, "option_sl2", None) or lt.get("option_sl2"))
+                o_tsl = _safe(getattr(at, "option_tsl", None) or lt.get("option_tsl"))
+                o_tp1 = _safe(getattr(at, "option_tp1", None) or lt.get("option_tp1"))
+                o_tp2 = _safe(getattr(at, "option_tp2", None) or lt.get("option_tp2"))
+                o_tp3 = _safe(getattr(at, "option_tp3", None) or lt.get("option_tp3"))
+            else:
+                raw_dir = str(lt.get("active_direction") or lt.get("signal", ""))
+                display_dir = "BUY" if raw_dir in ("LONG", "BUY") else ("SELL" if raw_dir in ("SHORT", "SELL") else "")
+                ep = _safe(lt.get("entry_price") or lt.get("close"))
+                et = _ts(lt.get("timestamp"))
+                st = _ts(lt.get("timestamp"))
+                s1 = _safe(lt.get("sl1") or lt.get("planned_sl1"))
+                s2 = _safe(lt.get("sl2"))
+                t1 = _safe(lt.get("tp1") or lt.get("planned_tp1"))
+                t2 = _safe(lt.get("tp2") or lt.get("planned_tp2"))
+                t3 = _safe(lt.get("tp3") or lt.get("planned_tp3"))
+                ts = _safe(lt.get("tsl"))
+                t1h = False
+                t2h = False
+                t3h = False
+                stp = str(lt.get("setup", ""))
+                o_type = str(lt.get("option_type", ""))
+                o_strike = _safe(lt.get("option_strike"))
+                o_sym = str(lt.get("option_symbol", ""))
+                o_entry = _safe(lt.get("option_entry"))
+                o_sl1 = _safe(lt.get("option_sl1"))
+                o_sl2 = _safe(lt.get("option_sl2"))
+                o_tsl = _safe(lt.get("option_tsl"))
+                o_tp1 = _safe(lt.get("option_tp1"))
+                o_tp2 = _safe(lt.get("option_tp2"))
+                o_tp3 = _safe(lt.get("option_tp3"))
             active_trade_info = {
-                "direction":   display_dir,
-                "entry_price": _safe(at.entry_price),
-                "entry_time":  _ts(at.entry_time),
-                "signal_time": _ts(at.signal_time),
-                "sl1":  _safe(at.sl1),
-                "sl2":  _safe(at.sl2),
-                "tp1":  _safe(at.tp1),
-                "tp2":  _safe(at.tp2),
-                "tp3":  _safe(at.tp3),
-                "tsl":  _safe(at.tsl),
-                "t1_hit": bool(at.t1_hit),
-                "t2_hit": bool(at.t2_hit),
-                "t3_hit": bool(at.t3_hit),
-                "setup": str(at.setup) if hasattr(at, "setup") else "",
+                "direction": display_dir,
+                "entry_price": ep,
+                "entry_time": et,
+                "signal_time": st,
+                "sl1": s1,
+                "sl2": s2,
+                "tp1": t1,
+                "tp2": t2,
+                "tp3": t3,
+                "tsl": ts,
+                "t1_hit": t1h,
+                "t2_hit": t2h,
+                "t3_hit": t3h,
+                "setup": stp,
                 "score": _signal_score_from_result(result),
+                "option_type": o_type,
+                "option_strike": o_strike,
+                "option_symbol": o_sym,
+                "option_entry": o_entry,
+                "option_sl1": o_sl1,
+                "option_sl2": o_sl2,
+                "option_tsl": o_tsl,
+                "option_tp1": o_tp1,
+                "option_tp2": o_tp2,
+                "option_tp3": o_tp3,
             }
 
         payload = {

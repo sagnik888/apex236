@@ -1,5 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { StatsResponse } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
 
 type HealthState = "live" | "scanning" | "degraded" | "offline";
 
@@ -88,6 +89,32 @@ export function SystemHealthPanel({ stats, isOffline, responseUpdatedAt, nextSca
     return () => window.clearInterval(interval);
   }, []);
 
+  const { data: brokerStatus } = useQuery({
+    queryKey: ["/api/brokers/status"],
+    queryFn: async () => {
+      const r = await fetch("/api/brokers/status");
+      if (!r.ok) throw new Error("Failed broker status");
+      return r.json();
+    },
+    refetchInterval: 10000,
+  });
+
+  const brokerLabel = !brokerStatus
+    ? "BROKER —"
+    : brokerStatus.angel_available && brokerStatus.upstox_available
+      ? "UPSTOX+ANGEL (50/50)"
+      : brokerStatus.upstox_available
+        ? "UPSTOX ONLY"
+        : brokerStatus.angel_available
+          ? "ANGEL ONLY"
+          : "BROKERS OFFLINE";
+
+  const brokerColor = !brokerStatus || (!brokerStatus.angel_available && !brokerStatus.upstox_available)
+    ? "border-signal-sell/30 bg-signal-sell/[0.08] text-signal-sell"
+    : brokerStatus.angel_available && brokerStatus.upstox_available
+      ? "border-blue-500/30 bg-blue-500/[0.08] text-blue-400"
+      : "border-yellow-500/30 bg-yellow-500/[0.08] text-yellow-400";
+
   const health: HealthState = isOffline || !stats
     ? "offline"
     : stats.scanning
@@ -119,6 +146,11 @@ export function SystemHealthPanel({ stats, isOffline, responseUpdatedAt, nextSca
           <span>{style.label}</span>
         </div>
         <div className="mx-1 h-5 w-px bg-border/80" aria-hidden="true" />
+        <div className={`flex h-7 items-center gap-1.5 rounded-md border px-2 text-[10px] font-extrabold tracking-[0.12em] ${brokerColor}`} title={`Multi-Broker Dispatcher: Equity balanced across Upstox & Angel One, Options routed via Upstox.`}>
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-current shadow-[0_0_5px_currentColor]" aria-hidden="true" />
+          <span>{brokerLabel}</span>
+        </div>
+        <div className="mx-1 h-5 w-px bg-border/80" aria-hidden="true" />
         <Metric value={String(stats?.scan_count ?? 0)} label="Scan" title="Scan cycles started since service launch" />
         <div className="h-5 w-px bg-border/60" aria-hidden="true" />
         <Metric value={formatDuration(stats?.scan_latency_ms)} label="Lat" title="Duration of the last completed full scan" />
@@ -136,6 +168,10 @@ export function SystemHealthPanel({ stats, isOffline, responseUpdatedAt, nextSca
         <span className={`h-2 w-2 shrink-0 rounded-full ${style.dot}`} aria-hidden="true" />
         <span className={`text-[10px] font-extrabold tracking-[0.12em] ${style.text}`}>
           {style.label}
+        </span>
+        <span className="h-4 w-px bg-border/70" aria-hidden="true" />
+        <span className={`text-[9px] font-extrabold tracking-[0.1em] ${brokerColor.split(" ")[2] || ""}`}>
+          {brokerLabel}
         </span>
         <span className="h-4 w-px bg-border/70" aria-hidden="true" />
         <span className="font-mono text-[11px] font-bold text-foreground tabular-nums">

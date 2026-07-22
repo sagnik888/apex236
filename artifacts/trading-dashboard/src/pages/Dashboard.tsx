@@ -1,8 +1,9 @@
 import { useState, useMemo, useEffect } from "react";
 import { useGetSignals, useGetScannerStats, useTriggerScan } from "@workspace/api-client-react";
 import type { Signal } from "@workspace/api-client-react";
-import { useLocation } from "wouter";
-import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown } from "lucide-react";
+import { useLocation, Link } from "wouter";
+import { useQuery } from "@tanstack/react-query";
+import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown, Sliders, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 type SortKey = "score" | "close" | "rsi" | "adx" | "pnl_pct" | "daily_move_pct" | "eta_hrs" | "signal_time";
@@ -169,6 +170,26 @@ export default function Dashboard() {
     query: { refetchInterval: 15000, queryKey: ["/api/stats"] }
   });
 
+  const { data: brokerStatus } = useQuery({
+    queryKey: ["/api/brokers/status"],
+    queryFn: async () => {
+      const r = await fetch("/api/brokers/status");
+      if (!r.ok) throw new Error("Failed broker status");
+      return r.json();
+    },
+    refetchInterval: 10000,
+  });
+
+  const { data: appSettings } = useQuery({
+    queryKey: ["/api/settings"],
+    queryFn: async () => {
+      const r = await fetch("/api/settings");
+      if (!r.ok) throw new Error("Failed settings");
+      return r.json();
+    },
+    refetchInterval: 10000,
+  });
+
   const { data: signalsData, isLoading } = useGetSignals(
     {
       timeframe: timeframe === "ALL" ? undefined : timeframe,
@@ -329,6 +350,56 @@ export default function Dashboard() {
         </Button>
       </div>
 
+      {/* Multi-Broker Load Balancer & Options Engine Overview Bar */}
+      <div className="mx-4 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-blue-500/30 bg-gradient-to-r from-blue-500/[0.08] via-card to-purple-500/[0.08] p-3 shadow-sm shrink-0">
+        <div className="flex flex-wrap items-center gap-4 text-xs">
+          <div className="flex items-center gap-2">
+            <span className="flex h-2 w-2 shrink-0 rounded-full bg-blue-400 shadow-[0_0_8px_rgba(59,130,246,0.8)] animate-pulse" />
+            <span className="font-extrabold tracking-wider text-foreground uppercase">
+              MULTI-BROKER LOAD BALANCER:
+            </span>
+            <span className="rounded bg-blue-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-blue-300 border border-blue-500/40">
+              Upstox: {brokerStatus?.upstox_assigned_count ?? 118} Stocks
+            </span>
+            <span className="text-muted-foreground">+</span>
+            <span className="rounded bg-purple-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-purple-300 border border-purple-500/40">
+              Angel One: {brokerStatus?.angel_assigned_count ?? 118} Stocks
+            </span>
+            <span className="text-[11px] text-muted-foreground font-medium">
+              ({brokerStatus?.split_ratio ?? "50/50 Equal Burden across 236 Nifty Universe"})
+            </span>
+          </div>
+
+          <div className="h-4 w-px bg-border hidden xl:block" />
+
+          <div className="flex items-center gap-2">
+            <span className="font-extrabold tracking-wider text-foreground flex items-center gap-1 uppercase">
+              <Zap className="h-3.5 w-3.5 text-yellow-400 fill-yellow-400" />
+              INTRADAY OPTIONS ENGINE:
+            </span>
+            {appSettings?.enable_options !== false ? (
+              <span className="rounded bg-emerald-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-emerald-400 border border-emerald-500/40">
+                ACTIVE (CE / PE via Upstox)
+              </span>
+            ) : (
+              <span className="rounded bg-gray-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-gray-400 border border-gray-500/40">
+                DISABLED
+              </span>
+            )}
+            <span className="text-[11px] text-muted-foreground">
+              Strike: <strong className="text-foreground">{appSettings?.strike_mode ?? "Smart Auto (ATM)"}</strong> · Risk: <strong className="text-foreground">{appSettings?.options_stop_mode ?? "Delta-Translated"}</strong>
+            </span>
+          </div>
+        </div>
+
+        <Link href="/settings">
+          <Button variant="outline" size="sm" className="h-7 text-xs border-primary/50 hover:bg-primary/10 transition-colors">
+            <Sliders className="h-3 w-3 mr-1.5 text-primary" />
+            Configure Options & Brokers
+          </Button>
+        </Link>
+      </div>
+
       {/* Market Breadth Widget */}
       {(stats as any)?.market_breadth && (
         <div className="flex items-center gap-2 p-2 mx-4 mt-4 bg-muted/30 border border-border rounded-lg text-sm shrink-0">
@@ -428,6 +499,14 @@ export default function Dashboard() {
                             {row.symbol}
                             {(row as any).transition === "BTST" && (
                               <span className="bg-yellow-500/20 text-yellow-500 text-[9px] font-bold px-1 rounded uppercase tracking-wider">BTST</span>
+                            )}
+                            {!iSwing && appSettings?.enable_options !== false && (
+                              <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-extrabold text-amber-400 border border-amber-500/30 tracking-wider" title="Intraday ATM option contract auto-routed via Upstox API v2 / AngelOne">
+                                <Zap className="h-2.5 w-2.5 fill-amber-400 flex-shrink-0" />
+                                <span>{(row as any).option_type || (row.direction === "BUY" ? "CE" : "PE")}</span>
+                                {(row as any).option_strike && <span className="font-mono text-amber-300">₹{(row as any).option_strike}</span>}
+                                {(row as any).option_entry && <span className="font-mono text-signal-buy text-[8.5px]">(₹{(row as any).option_entry.toFixed(1)})</span>}
+                              </span>
                             )}
                           </span>
                           <div className="flex items-center gap-1.5 text-[9px] font-normal tracking-wide">

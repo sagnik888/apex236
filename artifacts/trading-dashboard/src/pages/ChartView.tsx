@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useParams, Link } from "wouter";
+import { useParams, Link, useLocation } from "wouter";
 import {
   createChart,
   CandlestickSeries,
@@ -11,7 +11,7 @@ import type { IChartApi, Time, SeriesMarker, PriceLineOptions } from "lightweigh
 import { useGetChart } from "@workspace/api-client-react";
 import {
   ArrowLeft, Activity, Target, Shield,
-  ArrowUpRight, ArrowDownRight, TrendingUp, TrendingDown, Clock,
+  ArrowUpRight, ArrowDownRight, TrendingUp, TrendingDown, Clock, Zap, Layers,
 } from "lucide-react";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -190,7 +190,8 @@ export default function ChartView() {
   }, [chartData, chartReady]);
 
   // ── Live P&L ───────────────────────────────────────────────────────────────
-  const at = chartData?.active_trade;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const at = chartData?.active_trade as any;
   const currentPrice = chartData?.current_price;
   const direction = at?.direction === "LONG" ? "BUY" : at?.direction === "SHORT" ? "SELL" : at?.direction;
   const livePnlPct = at && at.entry_price && currentPrice
@@ -206,7 +207,24 @@ export default function ChartView() {
             <ArrowLeft className="h-4 w-4" />
           </Link>
           <h1 className="text-xl font-bold font-mono tracking-tight">{safeSymbol}</h1>
-          <span className="px-2 py-0.5 bg-muted rounded text-xs font-bold font-mono text-muted-foreground">{safeTimeframe}</span>
+          
+          {/* Multi-Timeframe Switcher Buttons */}
+          <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-md border border-border/50">
+            {["15m", "1h", "4h", "1d"].map((tf) => (
+              <button
+                key={tf}
+                onClick={() => setLocation(`/chart/${encodeURIComponent(safeSymbol)}/${tf}`)}
+                className={`px-2 py-0.5 rounded text-xs font-bold font-mono transition-all ${
+                  safeTimeframe === tf
+                    ? "bg-primary text-primary-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground hover:bg-muted"
+                }`}
+              >
+                {tf}
+              </button>
+            ))}
+          </div>
+
           {chartData?.scan_run_at && (
             <span className="text-[10px] text-muted-foreground font-mono hidden md:block">
               Data as of {fmtDateTime(chartData.scan_run_at)}
@@ -253,90 +271,161 @@ export default function ChartView() {
         {/* Side Panel */}
         <div className="w-72 border-l border-border bg-card flex flex-col shrink-0 overflow-auto">
 
-          {/* ── Active Trade Block ── */}
+          {/* ── Active Trade & Options Block ── */}
           {at ? (
-            <div className="p-4 border-b border-border">
-              <h3 className="font-bold text-xs uppercase tracking-wider mb-3 text-muted-foreground">Active Trade</h3>
+            <div className="p-4 border-b border-border space-y-4">
+              <div>
+                <h3 className="font-bold text-xs uppercase tracking-wider mb-2 text-muted-foreground">Active Trade (Cash / Futures)</h3>
 
-              {/* Direction badge */}
-              <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded text-sm font-bold tracking-widest mb-3 ${
-                direction === "BUY"
-                  ? "bg-signal-buy/20 text-signal-buy border border-signal-buy/30"
-                  : "bg-signal-sell/20 text-signal-sell border border-signal-sell/30"
-              }`}>
-                {direction === "BUY" ? <ArrowUpRight className="h-4 w-4" /> : <ArrowDownRight className="h-4 w-4" />}
-                {direction}
-              </div>
-
-              {/* Times */}
-              <div className="space-y-1 mb-3 text-[11px] font-mono text-muted-foreground">
-                {at.signal_time && (
-                  <div className="flex items-center gap-1.5">
-                    <Clock className="h-3 w-3 flex-shrink-0" />
-                    <span className="text-foreground/70 font-semibold">Signal:</span>
-                    <span>{fmtDateTime(at.signal_time)}</span>
-                  </div>
-                )}
-                {at.entry_time && (
-                  <div className="flex items-center gap-1.5">
-                    <Clock className="h-3 w-3 flex-shrink-0" />
-                    <span className="text-foreground/70 font-semibold">Entry:</span>
-                    <span>{fmtDateTime(at.entry_time)}</span>
-                  </div>
-                )}
-              </div>
-
-              {/* Entry / Stops */}
-              <div className="bg-background rounded border border-border p-3 mb-3 space-y-2">
-                <div className="flex justify-between items-center">
-                  <span className="text-xs text-muted-foreground uppercase font-semibold">Entry</span>
-                  <span className="font-mono font-bold tabular-nums">₹{at.entry_price?.toFixed(2) ?? "—"}</span>
+                {/* Direction badge */}
+                <div className={`inline-flex items-center gap-1.5 px-3 py-1 rounded text-sm font-bold tracking-widest mb-3 ${
+                  direction === "BUY"
+                    ? "bg-signal-buy/20 text-signal-buy border border-signal-buy/30"
+                    : "bg-signal-sell/20 text-signal-sell border border-signal-sell/30"
+                }`}>
+                  {direction === "BUY" ? <ArrowUpRight className="h-4 w-4" /> : <ArrowDownRight className="h-4 w-4" />}
+                  {direction}
                 </div>
-                <div className="flex justify-between items-center text-signal-sell">
-                  <span className="text-xs uppercase font-semibold flex items-center gap-1">
-                    <Shield className="h-3 w-3" /> SL1
-                  </span>
-                  <span className="font-mono font-bold tabular-nums">₹{at.sl1?.toFixed(2) ?? "—"}</span>
-                </div>
-                {at.sl2 != null && (
-                  <div className="flex justify-between items-center text-signal-sell/60">
-                    <span className="text-xs uppercase font-semibold flex items-center gap-1">
-                      <Shield className="h-3 w-3" /> SL2
-                    </span>
-                    <span className="font-mono tabular-nums">₹{at.sl2.toFixed(2)}</span>
-                  </div>
-                )}
-                {at.tsl != null && (
-                  <div className="flex justify-between items-center text-orange-400">
-                    <span className="text-xs uppercase font-semibold flex items-center gap-1">
-                      <Shield className="h-3 w-3" /> TSL
-                    </span>
-                    <span className="font-mono font-bold tabular-nums">₹{at.tsl.toFixed(2)}</span>
-                  </div>
-                )}
-              </div>
 
-              {/* Targets */}
-              <div className="bg-background rounded border border-border p-3 space-y-2">
-                <span className="text-xs text-muted-foreground uppercase font-semibold flex items-center gap-1 mb-2">
-                  <Target className="h-3 w-3" /> Targets
-                </span>
-                {[
-                  { label: "T1", price: at.tp1, hit: at.t1_hit },
-                  { label: "T2", price: at.tp2, hit: at.t2_hit },
-                  { label: "T3", price: at.tp3, hit: at.t3_hit },
-                ].map((tp, i) => tp.price != null ? (
-                  <div key={i} className="flex justify-between items-center">
-                    <span className={`text-xs font-mono ${tp.hit ? "text-signal-buy" : "text-muted-foreground"}`}>{tp.label}</span>
-                    <div className="flex items-center gap-2">
-                      <span className={`font-mono text-sm tabular-nums ${tp.hit ? "text-signal-buy/60 line-through" : "font-bold"}`}>
-                        ₹{tp.price.toFixed(2)}
-                      </span>
-                      {tp.hit && <span className="w-2 h-2 rounded-full bg-signal-buy shadow-[0_0_5px_var(--color-signal-buy)]" />}
+                {/* Times */}
+                <div className="space-y-1 mb-3 text-[11px] font-mono text-muted-foreground">
+                  {at.signal_time && (
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="h-3 w-3 flex-shrink-0" />
+                      <span className="text-foreground/70 font-semibold">Signal:</span>
+                      <span>{fmtDateTime(at.signal_time)}</span>
                     </div>
+                  )}
+                  {at.entry_time && (
+                    <div className="flex items-center gap-1.5">
+                      <Clock className="h-3 w-3 flex-shrink-0" />
+                      <span className="text-foreground/70 font-semibold">Entry:</span>
+                      <span>{fmtDateTime(at.entry_time)}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Entry / Stops */}
+                <div className="bg-background rounded border border-border p-3 mb-3 space-y-2">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs text-muted-foreground uppercase font-semibold">Underlying Entry</span>
+                    <span className="font-mono font-bold tabular-nums">₹{at.entry_price?.toFixed(2) ?? "—"}</span>
                   </div>
-                ) : null)}
+                  <div className="flex justify-between items-center text-signal-sell">
+                    <span className="text-xs uppercase font-semibold flex items-center gap-1">
+                      <Shield className="h-3 w-3" /> SL1
+                    </span>
+                    <span className="font-mono font-bold tabular-nums">₹{at.sl1?.toFixed(2) ?? "—"}</span>
+                  </div>
+                  {at.sl2 != null && (
+                    <div className="flex justify-between items-center text-signal-sell/60">
+                      <span className="text-xs uppercase font-semibold flex items-center gap-1">
+                        <Shield className="h-3 w-3" /> SL2
+                      </span>
+                      <span className="font-mono tabular-nums">₹{at.sl2.toFixed(2)}</span>
+                    </div>
+                  )}
+                  {at.tsl != null && (
+                    <div className="flex justify-between items-center text-orange-400">
+                      <span className="text-xs uppercase font-semibold flex items-center gap-1">
+                        <Shield className="h-3 w-3" /> TSL
+                      </span>
+                      <span className="font-mono font-bold tabular-nums">₹{at.tsl.toFixed(2)}</span>
+                    </div>
+                  )}
+                </div>
+
+                {/* Targets */}
+                <div className="bg-background rounded border border-border p-3 space-y-2">
+                  <span className="text-xs text-muted-foreground uppercase font-semibold flex items-center gap-1 mb-2">
+                    <Target className="h-3 w-3" /> Targets
+                  </span>
+                  {[
+                    { label: "T1", price: at.tp1, hit: at.t1_hit },
+                    { label: "T2", price: at.tp2, hit: at.t2_hit },
+                    { label: "T3", price: at.tp3, hit: at.t3_hit },
+                  ].map((tp, i) => tp.price != null ? (
+                    <div key={i} className="flex justify-between items-center">
+                      <span className={`text-xs font-mono ${tp.hit ? "text-signal-buy" : "text-muted-foreground"}`}>{tp.label}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={`font-mono text-sm tabular-nums ${tp.hit ? "text-signal-buy/60 line-through" : "font-bold"}`}>
+                          ₹{tp.price.toFixed(2)}
+                        </span>
+                        {tp.hit && <span className="w-2 h-2 rounded-full bg-signal-buy shadow-[0_0_5px_var(--color-signal-buy)]" />}
+                      </div>
+                    </div>
+                  ) : null)}
+                </div>
               </div>
+
+              {/* ── Options Card ── */}
+              {(at.option_type || at.option_strike) && (
+                <div className="bg-amber-500/10 border border-amber-500/40 rounded-lg p-3 space-y-3">
+                  <div className="flex items-center justify-between border-b border-amber-500/20 pb-2">
+                    <span className="text-xs font-bold text-amber-500 uppercase tracking-wider flex items-center gap-1">
+                      <Zap className="h-3.5 w-3.5" /> ATM Option Guidance
+                    </span>
+                    <span className="px-1.5 py-0.5 bg-amber-500/20 text-amber-400 font-mono text-[10px] rounded font-bold">
+                      {at.option_type || (direction === "BUY" ? "CE" : "PE")}
+                    </span>
+                  </div>
+
+                  <div className="text-xs font-mono font-bold text-foreground break-all">
+                    {at.option_symbol || `${safeSymbol} ${at.option_strike || ""} ${at.option_type || ""}`}
+                  </div>
+
+                  {at.option_strike && (
+                    <div className="flex justify-between items-center text-xs">
+                      <span className="text-muted-foreground">Strike Price:</span>
+                      <span className="font-mono font-bold text-amber-400">₹{at.option_strike}</span>
+                    </div>
+                  )}
+
+                  <div className="bg-background/80 rounded border border-border/60 p-2.5 space-y-1.5 font-mono text-xs">
+                    <div className="flex justify-between items-center">
+                      <span className="text-muted-foreground">Opt Entry:</span>
+                      <span className="font-bold tabular-nums">₹{at.option_entry?.toFixed(2) ?? "—"}</span>
+                    </div>
+                    <div className="flex justify-between items-center text-signal-sell">
+                      <span>Opt SL1:</span>
+                      <span className="font-bold tabular-nums">₹{at.option_sl1?.toFixed(2) ?? "—"}</span>
+                    </div>
+                    {at.option_sl2 != null && (
+                      <div className="flex justify-between items-center text-signal-sell/70">
+                        <span>Opt SL2:</span>
+                        <span className="tabular-nums">₹{at.option_sl2.toFixed(2)}</span>
+                      </div>
+                    )}
+                    {at.option_tsl != null && (
+                      <div className="flex justify-between items-center text-orange-400">
+                        <span>Opt TSL:</span>
+                        <span className="font-bold tabular-nums">₹{at.option_tsl.toFixed(2)}</span>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="bg-background/80 rounded border border-border/60 p-2.5 space-y-1 font-mono text-xs">
+                    <div className="text-[10px] text-muted-foreground uppercase font-semibold mb-1">Option Targets</div>
+                    {[
+                      { label: "Opt T1", price: at.option_tp1 },
+                      { label: "Opt T2", price: at.option_tp2 },
+                      { label: "Opt T3", price: at.option_tp3 },
+                    ].map((otp, idx) => otp.price != null ? (
+                      <div key={idx} className="flex justify-between items-center">
+                        <span className="text-muted-foreground">{otp.label}:</span>
+                        <span className="font-bold tabular-nums text-signal-buy">₹{otp.price.toFixed(2)}</span>
+                      </div>
+                    ) : null)}
+                  </div>
+
+                  <div className="text-[10px] font-mono text-muted-foreground border-t border-amber-500/20 pt-2 flex items-center justify-between">
+                    <span>Execution Broker:</span>
+                    <span className="text-foreground font-semibold">
+                      {(at.option_type === "CE" || direction === "BUY") ? "Upstox API (v2)" : "AngelOne API"}
+                    </span>
+                  </div>
+                </div>
+              )}
             </div>
           ) : (
             <div className="p-4 border-b border-border text-center text-muted-foreground">
