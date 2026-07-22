@@ -4,62 +4,66 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import json
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
 from datetime import datetime, date as dt_date, time as dt_time
+from threading import Lock
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import numpy as np
 
-from apex_python_scanner import ApexConfig, ApexScanner, SymbolResult, ActiveTrade
+from apex_python_scanner import ApexConfig, ApexScanner, SymbolResult
 from data_provider import IST, fetch_ohlcv
 from nifty50 import NIFTY236_SYMBOLS, TIMEFRAMES
 from database import SessionLocal, Trade, SignalState
 from sectors import get_sector
+from market_calendar import holidays_for, is_holiday
 
 logger = logging.getLogger(__name__)
 
 IST_TZ = ZoneInfo("Asia/Kolkata")
+
+# Optional ops knob: scan only the first N symbols (integration testing).
+_symbol_limit = int(os.getenv("APEX_SYMBOL_LIMIT", "0") or "0")
+SCAN_SYMBOLS: list[str] = NIFTY236_SYMBOLS[:_symbol_limit] if _symbol_limit > 0 else NIFTY236_SYMBOLS
 
 # ─── NSE Session Helpers ──────────────────────────────────────────────────────
 
 NSE_OPEN  = dt_time(9, 15)
 NSE_CLOSE = dt_time(15, 30)
 
-# NSE trading holidays 2026
-NSE_HOLIDAYS_2026: set[dt_date] = {
-    dt_date(2026, 1, 26),   # Republic Day
-    dt_date(2026, 3, 25),   # Holi
-    dt_date(2026, 4, 2),    # Ram Navami
-    dt_date(2026, 4, 3),    # Good Friday
-    dt_date(2026, 4, 14),   # Ambedkar Jayanti
-    dt_date(2026, 5, 1),    # Maharashtra Day
-    dt_date(2026, 8, 15),   # Independence Day
-    dt_date(2026, 10, 2),   # Gandhi Jayanti
-    dt_date(2026, 11, 2),   # Diwali Laxmi Pujan (2026)
-    dt_date(2026, 11, 3),   # Diwali Balipratipada
-    dt_date(2026, 12, 25),  # Christmas
-}
+# Backwards-compatible alias; the authoritative list lives in market_calendar.
+NSE_HOLIDAYS_2026: set[dt_date] = holidays_for(2026)
 
 
 def ist_now() -> datetime:
     return datetime.now(IST_TZ)
 
 
-def get_market_status() -> dict:
-    """Return current NSE market session status."""
-    now = ist_now()
+def get_market_status(now: Optional[datetime] = None) -> dict:
+    """Return NSE cash-market session status in Asia/Kolkata time.
+
+    ``now`` is injectable so session boundaries can be verified without
+    changing the machine clock. Naive values are interpreted as IST.
+    """
+    now = now or ist_now()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=IST_TZ)
+    else:
+        now = now.astimezone(IST_TZ)
     today = now.date()
     t = now.time().replace(tzinfo=None)
 
     is_weekday = today.weekday() < 5
-    is_holiday = today in NSE_HOLIDAYS_2026
+    holiday_today = is_holiday(today)
     is_open_window = NSE_OPEN <= t <= NSE_CLOSE
-    market_open = is_weekday and not is_holiday and is_open_window
+    market_open = is_weekday and not holiday_today and is_open_window
 
-    if is_holiday:
+    if holiday_today:
         status = "HOLIDAY"
     elif not is_weekday:
         status = "WEEKEND"
@@ -85,7 +89,7 @@ def get_market_status() -> dict:
                 candidate_dt += pd.Timedelta(days=1)
                 candidate = candidate_dt.date()
                 continue
-            if candidate.weekday() < 5 and candidate not in NSE_HOLIDAYS_2026:
+            if candidate.weekday() < 5 and not is_holiday(candidate):
                 next_open_str = candidate_dt.isoformat()
                 break
             import datetime as _dt
@@ -100,242 +104,268 @@ def get_market_status() -> dict:
     }
 
 
-def scan_interval_secs() -> int:
+def scan_interval_secs(now: Optional[datetime] = None) -> int:
     """Return the recommended seconds to wait before the next scan."""
-    ms = get_market_status()
+    ms = get_market_status(now)
     if ms["market_open"]:
-        return 300    # 5 min during live market
+        return 60     # live 15m signal refresh
     if ms["session_status"] == "PRE_OPEN":
-        return 600    # 10 min in pre-open
+        return 60     # do not sleep through the 09:15 transition
     return 3600       # 1 hour outside market (swing signals still matter)
 
 
 # ─── Per-timeframe APEX configs ───────────────────────────────────────────────
 
+# entry_delay_bars=1: signal evaluates on candle close, entry fills at the NEXT
+# candle's open. The previous 0 reproduced Pine's same-bar lookahead (the top
+# finding in both audits) and inflated every backtest stat shown in the UI.
+# strict_ohlcv=False: one bad provider tick must drop the row with a warning,
+# not silently knock the whole symbol out of the scan while stale results
+# stay published.
 _CONFIGS: dict[str, ApexConfig] = {
     "15m": ApexConfig(
         min_score=65.0,
         conflict_margin=15.0,
         use_htf=True,
-        entry_delay_bars=0,
+        entry_delay_bars=1,
         realistic_fills=True,
         allow_entry_on_last_bar=True,
         use_session=True,
         enforce_market_hours=True,
-        max_input_bars=800,
-        keep_full_history=True,
+        max_input_bars=400,
+        keep_full_history=False,
+        fixed_sl_pct=0.5,  # 0.5% for intraday as requested
+        strict_ohlcv=False,
     ),
     "1h": ApexConfig(
         min_score=63.0,
         conflict_margin=14.0,
         use_htf=True,
-        entry_delay_bars=0,
+        entry_delay_bars=1,
         realistic_fills=True,
         allow_entry_on_last_bar=True,
         use_session=False,
-        max_input_bars=700,
-        keep_full_history=True,
+        max_input_bars=400,
+        keep_full_history=False,
+        fixed_sl_pct=0.0,  # No fixed SL hardcap - always ATR-based
+        strict_ohlcv=False,
     ),
     "4h": ApexConfig(
         min_score=60.0,
         conflict_margin=12.0,
         use_htf=True,
-        entry_delay_bars=0,
+        entry_delay_bars=1,
         realistic_fills=True,
         allow_entry_on_last_bar=True,
         use_session=False,
-        max_input_bars=500,
-        keep_full_history=True,
+        max_input_bars=350,
+        keep_full_history=False,
+        fixed_sl_pct=0.0,  # No fixed SL hardcap - always ATR-based
+        strict_ohlcv=False,
     ),
     "1d": ApexConfig(
         min_score=58.0,
         conflict_margin=10.0,
         use_htf=True,
-        entry_delay_bars=0,
+        entry_delay_bars=1,
         realistic_fills=True,
         allow_entry_on_last_bar=True,
         use_session=False,
-        max_input_bars=400,
-        keep_full_history=True,
+        max_input_bars=300,
+        keep_full_history=False,
+        fixed_sl_pct=0.0,  # No fixed SL hardcap - always ATR-based
+        strict_ohlcv=False,
     ),
 }
 
-_SCANNERS: dict[str, ApexScanner] = {
-    tf: ApexScanner(cfg) for tf, cfg in _CONFIGS.items()
-}
+def build_configs() -> dict[str, ApexConfig]:
+    """Apply user settings (settings_store) on top of the per-TF baselines."""
+    import copy
+    from settings_store import get_settings
 
-# Expected typical trade durations per timeframe (hours)
+    s = get_settings()
+    configs: dict[str, ApexConfig] = {}
+    for tf, base in _CONFIGS.items():
+        cfg = copy.copy(base)  # dataclass with slots; shallow copy is fine
+        # Keep scanner gates identical to the user's APEX Hybrid Pro settings.
+        # Per-timeframe baselines still supply data/history sizing only.
+        cfg.min_score = float(s["min_score"])
+        cfg.conflict_margin = float(s["conflict_margin"])
+        cfg.min_adx = float(s["min_adx"])
+        cfg.use_htf = bool(s["use_htf"])
+        cfg.signal_cooldown = int(s["signal_cooldown"])
+        cfg.atr_mult = float(s["atr_mult"])
+        if s["sl_mode"] == "fixed":
+            cfg.fixed_sl_pct = float(s["fixed_sl_pct"])
+        if s["target_mode"] == "fixed":
+            cfg.fixed_tp_pct = float(s["fixed_tp_pct"])
+        else:
+            cfg.fixed_tp_pct = 0.0
+            cfg.t1_r, cfg.t2_r, cfg.t3_r = float(s["t1_r"]), float(s["t2_r"]), float(s["t3_r"])
+        cfg.exit_at_t1 = bool(s["exit_at_t1"])
+        cfg.use_trail = bool(s["use_trail"])
+        cfg.trail_start_r = float(s["trail_start_r"])
+        cfg.trail_mult = float(s["trail_mult"])
+        cfg.lock_at_t1 = bool(s["lock_at_t1"])
+        cfg.exit_confirmation_bars = int(s["exit_confirmation_bars"])
+        cfg.max_consecutive_losses = int(s["max_consecutive_losses"])
+        cfg.circuit_pause_bars = int(s["circuit_pause_bars"])
+        cfg.use_session = bool(s["use_session"])
+        cfg.block_open_noise = bool(s["block_open_noise"])
+        cfg.block_close_noise = bool(s["block_close_noise"])
+        cfg.validate()
+        configs[tf] = cfg
+    return configs
+
+
+# ─── Top-level Helpers & Formatting ───────────────────────────────────────────
+
 _EXPECTED_DURATION_HRS: dict[str, float] = {
-    "15m": 3.0,
-    "1h":  12.0,
-    "4h":  48.0,
-    "1d":  240.0,  # 10 trading days
+    "15m": 4.0,
+    "1h": 24.0,
+    "4h": 72.0,
+    "1d": 240.0,
 }
 
 
-# ─── Value helpers ────────────────────────────────────────────────────────────
-
-def _safe(v: Any) -> Optional[float]:
+def _ts(val: Any) -> Optional[str]:
+    """Convert a timestamp/datetime/string to ISO string format or return None."""
+    if val is None or pd.isna(val) or val == "" or val == "—":
+        return None
+    if isinstance(val, str):
+        return val
+    if hasattr(val, "isoformat"):
+        return val.isoformat()
     try:
-        f = float(v)
-        return None if (math.isnan(f) or math.isinf(f)) else f
-    except (TypeError, ValueError):
+        return str(pd.to_datetime(val).isoformat())
+    except Exception:
+        return str(val)
+
+
+def _safe(val: Any) -> Optional[float]:
+    """Safely convert value to float, returning None if invalid/nan/inf."""
+    if val is None or pd.isna(val) or val == "" or val == "—":
+        return None
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return None
+        return round(f, 4)
+    except (ValueError, TypeError):
         return None
 
 
-def _ts(ts: Any) -> Optional[str]:
-    try:
-        if isinstance(ts, pd.Timestamp):
-            return ts.isoformat()
-        return str(ts) if ts else None
-    except Exception:
-        return None
+def _tick(val: Any) -> Optional[float]:
+    """Format price value to 2 decimal places."""
+    f = _safe(val)
+    return round(f, 2) if f is not None else None
 
 
-def _trade_type(tf: str, entry_ts: Optional[pd.Timestamp] = None, direction: str = "", expected_duration_hrs: float = 0.0) -> str:
-    """Classify trade dynamically as Intraday, BTST, STBT, or Swing."""
-    if pd.isna(entry_ts) or entry_ts is None:
-        return "Swing" if tf in ("4h", "1d") else "Intraday"
-        
-    try:
-        now = pd.Timestamp.now(tz=entry_ts.tz) if entry_ts.tz else pd.Timestamp.now()
-        
-        # If signal is from a previous day, it's definitely a Swing trade.
-        if entry_ts.date() < now.date():
-            return "Swing"
-            
-        # Signal was generated TODAY.
-        current_hour = now.hour + (now.minute / 60.0)
-        remaining_hours = max(0.0, 15.5 - current_hour)
-        
-        is_late = current_hour >= 15.25  # 15:15 or later
-        spans_overnight = expected_duration_hrs > remaining_hours
-        
-        if is_late or spans_overnight or tf in ("4h", "1d"):
-            if direction.upper() in ("BUY", "LONG"):
-                return "BTST"
-            elif direction.upper() in ("SELL", "SHORT"):
-                return "STBT"
-            return "Swing"
-            
-        return "Intraday"
-    except Exception:
-        return "Swing" if tf in ("4h", "1d") else "Intraday"
-
-
-def _signal_score_from_result(result: SymbolResult) -> float:
-    """
-    Get the most meaningful score for a symbol.
-
-    Priority order:
-    1. Latest bar's signal_score (if > 0)
-    2. Most recent signal_score > 0 anywhere in the frame (for ACTIVE trades
-       where the signal fired on a previous bar)
-    3. dominant_score from latest bar
-    4. Max of bull_score / bear_score
-    """
-    lt = result.latest
-
-    # 1. Latest bar signal_score
-    sc = lt.get("signal_score")
-    if sc is not None:
-        f = _safe(sc)
-        if f is not None and f > 0:
-            return f
-
-    # 2. Search backwards in frame for most recent non-zero signal_score
-    frame = result.frame
-    if frame is not None and not frame.empty and "signal_score" in frame.columns:
-        col = frame["signal_score"]
-        nonzero = col[col > 0]
-        if not nonzero.empty:
-            return float(nonzero.iloc[-1])
-
-    # 3. dominant_score
-    dom = lt.get("dominant_score")
-    if dom is not None:
-        f = _safe(dom)
-        if f is not None and f > 0:
-            return f
-
-    # 4. bull/bear score based on bias
-    bias = str(lt.get("bias", ""))
-    if "BULL" in bias:
-        bs = _safe(lt.get("bull_score"))
-        if bs:
-            return bs
-    elif "BEAR" in bias:
-        bs = _safe(lt.get("bear_score"))
-        if bs:
-            return bs
-
-    # 5. max of whatever scores exist
-    candidates = [_safe(lt.get(k)) for k in ("bull_score", "bear_score", "dominant_score")]
-    valid = [c for c in candidates if c is not None and c > 0]
-    return max(valid) if valid else 0.0
+def _first_num(*args: Any) -> Optional[float]:
+    """Return the first positive valid float from arguments."""
+    for arg in args:
+        v = _safe(arg)
+        if v is not None and v > 0:
+            return v
+    return None
 
 
 def _daily_move_pct(result: SymbolResult) -> Optional[float]:
-    """Today's price move from previous daily close (%)."""
-    frame = result.frame
-    if frame is None or frame.empty:
+    """Extract or calculate daily move percentage from SymbolResult."""
+    if not result or not result.latest:
         return None
-    try:
-        dates = frame.index.normalize().unique()
-        if len(dates) < 2:
-            return 0.0
-            
-        prev_date = dates[-2]
-        prev_close_series = frame[frame.index.normalize() == prev_date]
-        if prev_close_series.empty:
-            return 0.0
-            
-        prev_close = _safe(prev_close_series.iloc[-1]["close"])
-        current = _safe(result.latest.get("close"))
-        
-        if not prev_close or not current or prev_close <= 0:
-            return None
-        return round((current - prev_close) / prev_close * 100, 2)
-    except Exception:
-        return None
+    val = _safe(result.latest.get("daily_move_pct"))
+    if val is not None:
+        return val
+    c = _safe(result.latest.get("close"))
+    o = _safe(result.latest.get("open"))
+    if c is not None and o is not None and o > 0:
+        return round((c - o) / o * 100, 2)
+    return None
 
 
-def _trade_age_hrs(entry_time_ts: Any) -> Optional[float]:
-    """Hours elapsed since trade entry."""
-    if entry_time_ts is None:
+def _trade_age_hrs(entry_ts: Any) -> Optional[float]:
+    """Return elapsed hours since entry_ts in Asia/Kolkata time."""
+    if entry_ts is None or pd.isna(entry_ts) or entry_ts == "" or entry_ts == "—":
         return None
     try:
-        now = ist_now()
-        if isinstance(entry_time_ts, pd.Timestamp):
-            et = entry_time_ts.to_pydatetime()
-            if et.tzinfo is None:
-                et = et.replace(tzinfo=IST_TZ)
-        elif isinstance(entry_time_ts, datetime):
-            et = entry_time_ts
-            if et.tzinfo is None:
-                et = et.replace(tzinfo=IST_TZ)
+        now_dt = datetime.now(IST_TZ)
+        dt = pd.to_datetime(entry_ts)
+        if dt.tz is None:
+            dt = dt.tz_localize(IST_TZ)
         else:
-            # Try parsing ISO string
-            from datetime import timezone
-            et = datetime.fromisoformat(str(entry_time_ts))
-            if et.tzinfo is None:
-                et = et.replace(tzinfo=IST_TZ)
-        diff = (now - et).total_seconds() / 3600
-        return round(max(0.0, diff), 1)
+            dt = dt.tz_convert(IST_TZ)
+        diff_sec = (now_dt - dt).total_seconds()
+        return round(max(0.0, diff_sec / 3600.0), 1)
     except Exception:
         return None
 
 
-def _eta_hrs(timeframe: str, age_hrs: Optional[float]) -> Optional[float]:
-    """Estimated hours remaining in the trade."""
-    expected = _EXPECTED_DURATION_HRS.get(timeframe, 24.0)
+def _eta_hrs(tf: str, age_hrs: Optional[float]) -> Optional[float]:
+    """Return expected remaining duration in hours for timeframe."""
+    exp = _EXPECTED_DURATION_HRS.get(tf, 24.0)
     if age_hrs is None:
-        return round(expected, 1)
-    remaining = expected - age_hrs
-    return round(remaining, 1)  # can be negative if trade is overdue
+        return exp
+    return round(max(0.0, exp - age_hrs), 1)
 
 
-# ─── Engine ───────────────────────────────────────────────────────────────────
+def _trade_type(
+    tf: str,
+    entry_ts: Any,
+    direction: str,
+    expected_duration: float,
+    exit_ts: Any = None,
+) -> str:
+    """Classify trade as INTRADAY or SWING."""
+    if tf in ("4h", "1d"):
+        return "SWING"
+    if entry_ts is not None and not pd.isna(entry_ts) and entry_ts != "—":
+        try:
+            dt_in = pd.to_datetime(entry_ts)
+            if exit_ts is not None and not pd.isna(exit_ts) and exit_ts != "—":
+                dt_out = pd.to_datetime(exit_ts)
+                if dt_out.date() != dt_in.date():
+                    return "SWING"
+            else:
+                now_dt = datetime.now(IST_TZ)
+                if now_dt.date() != dt_in.date():
+                    return "SWING"
+        except Exception:
+            pass
+    return "INTRADAY"
+
+
+def _signal_score_from_result(result: SymbolResult) -> float:
+    """Extract score from result and decay exponentially by bars_since_signal."""
+    if not result or not result.latest:
+        return 0.0
+    raw = _safe(result.latest.get("score")) or 0.0
+    bars_since = _safe(result.latest.get("bars_since_signal")) or 0.0
+    if bars_since > 0:
+        return round(raw * (0.95 ** bars_since), 1)
+    return round(raw, 1)
+
+
+def _scan_preloaded(
+    symbol: str,
+    tf: str,
+    df: Optional[pd.DataFrame],
+    settings_rev: int = 0,
+) -> Optional[SymbolResult]:
+    """Top-level worker function executed inside ProcessPoolExecutor."""
+    if df is None or df.empty:
+        return None
+    try:
+        configs = build_configs()
+        cfg = configs.get(tf)
+        if cfg is None:
+            return None
+        scanner = ApexScanner(cfg)
+        return scanner.run_symbol(symbol, df)
+    except Exception as exc:
+        logger.warning(f"Worker scan error for {symbol}/{tf}: {exc}")
+        return None
+
 
 class ScannerEngine:
     """Maintains scanner state across all symbols and timeframes."""
@@ -345,8 +375,41 @@ class ScannerEngine:
         self._scanning: bool = False
         self._last_scan: Optional[datetime] = None
         self._scan_errors: int = 0
+        self._scan_count: int = 0
+        self._scan_latency_ms: Optional[float] = None
+        self._scan_started_at: Optional[datetime] = None
+        self._scan_state_lock = Lock()
         self._pending_events: list[dict] = []   # notification events from last scan
         self._analytics_cache: dict[tuple[int, Optional[str]], dict] = {}
+        self._signals_cache: Optional[dict] = None
+        self._signals_lock = Lock()
+        self._trades_cache: Optional[dict] = None
+        self._leaderboard_cache: Optional[dict] = None
+        self._api_cache_lock = Lock()
+        self._chart_cache: dict[tuple[str, str], tuple[int, dict, str]] = {}
+        self._chart_pending: set[tuple[str, str]] = set()
+        self._chart_lock = Lock()
+        self._chart_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="apex-chart")
+        self._scan_executor: Optional[ProcessPoolExecutor] = None
+
+        # Keep analytics route latency deterministic even while the first scan
+        # is still building. These empty snapshots are replaced atomically when
+        # a complete scan generation is ready.
+        for tenure in ("1d", "7d", "30d", "90d", "180d", "365d"):
+            self.get_analytics(tenure)
+
+    def _get_scan_executor(self) -> ProcessPoolExecutor:
+        if self._scan_executor is None:
+            default_workers = max(1, min(4, (os.cpu_count() or 2) - 1))
+            worker_count = max(1, int(os.getenv("APEX_SCAN_WORKERS", str(default_workers))))
+            self._scan_executor = ProcessPoolExecutor(max_workers=worker_count)
+        return self._scan_executor
+
+    def shutdown(self) -> None:
+        """Release background executors during an orderly API shutdown."""
+        self._chart_executor.shutdown(wait=False, cancel_futures=True)
+        if self._scan_executor is not None:
+            self._scan_executor.shutdown(wait=False, cancel_futures=True)
 
     # ── State diffing for notifications ───────────────────────────────────────
 
@@ -399,8 +462,8 @@ class ScannerEngine:
                 if curr_sig in ("BUY", "SELL") and old["signal"] != curr_sig:
                     display_dir = curr_sig
                     close = _safe(lt.get("close")) or 0.0
-                    sl1   = _safe(lt.get("sl1") or lt.get("planned_sl1"))
-                    tp1   = _safe(lt.get("tp1") or lt.get("planned_tp1"))
+                    sl1   = _tick(_first_num(lt.get("sl1"), lt.get("planned_sl1")))
+                    tp1   = _tick(_first_num(lt.get("tp1"), lt.get("planned_tp1")))
                     events.append({
                         "type":      "new_signal",
                         "symbol":    sym,
@@ -518,46 +581,95 @@ class ScannerEngine:
     # ── Scan ──────────────────────────────────────────────────────────────────
     def run_all_scans(self, timeframes: Optional[list[str]] = None) -> None:
         """Fetch data and scan all configured symbols on all/given timeframes."""
-        if self._scanning:
-            logger.info("Scan already running – skip")
-            return
-        self._scanning = True
-        self._scan_errors = 0
-        tfs_to_scan = timeframes or TIMEFRAMES
+        # Admit one scan atomically so overlapping background/manual requests
+        # cannot both start or inflate the telemetry counter.
+        with self._scan_state_lock:
+            if self._scanning:
+                logger.info("Scan already running – skip")
+                return
+            self._scanning = True
+            self._scan_errors = 0
+            self._scan_count += 1
+            self._scan_started_at = ist_now()
+        scan_started_monotonic = time.monotonic()
+        from settings_store import get_settings, revision as settings_revision
+        enabled = get_settings()["enabled_timeframes"]
+        tfs_to_scan = timeframes or [tf for tf in TIMEFRAMES if tf in enabled] or TIMEFRAMES
+        settings_rev = settings_revision()
         ms = get_market_status()
         logger.info(
-            f"Starting scan: {len(NIFTY236_SYMBOLS)} symbols × {len(tfs_to_scan)} timeframes "
+            f"Starting scan: {len(SCAN_SYMBOLS)} symbols × {len(tfs_to_scan)} timeframes "
             f"[session={ms['session_status']}]"
         )
         prev_states = self._snapshot_states()
         new_results: dict[str, dict[str, SymbolResult]] = {tf: {} for tf in tfs_to_scan}
         try:
             from data_provider import prefetch_all_ohlcv
-            prefetch_all_ohlcv(NIFTY236_SYMBOLS, tfs_to_scan)
-            
-            with ThreadPoolExecutor(max_workers=4) as exe:
-                futures = {
-                    exe.submit(self._fetch_and_scan, sym, tf): (sym, tf)
-                    for tf in tfs_to_scan
-                    for sym in NIFTY236_SYMBOLS
-                }
-                for fut in as_completed(futures):
-                    sym, tf = futures[fut]
-                    try:
-                        res = fut.result()
-                        if res:
-                            display = sym.replace(".NS", "")
-                            new_results[tf][display] = res
-                    except Exception as exc:
-                        logger.error(f"Scan error {sym}/{tf}: {exc}")
-                        self._scan_errors += 1
-            # Atomically update self._results at the end so partial/in-flight states are never exposed
+
+            # Warm and publish one timeframe at a time. Copy-on-write result
+            # dictionaries let API readers see completed symbols immediately
+            # without ever iterating a dictionary that is being mutated.
             for tf in tfs_to_scan:
-                if tf not in self._results or not self._results[tf]:
-                    self._results[tf] = new_results[tf]
-                else:
-                    self._results[tf].update(new_results[tf])
-            self._analytics_cache.clear()
+                prefetch_all_ohlcv(SCAN_SYMBOLS, [tf])
+                executor = self._get_scan_executor()
+                symbol_iterator = iter(SCAN_SYMBOLS)
+                pending: dict[Any, str] = {}
+                max_pending = max(2, int(os.getenv("APEX_SCAN_WORKERS", "4")) * 2)
+
+                def submit_next() -> bool:
+                    try:
+                        symbol = next(symbol_iterator)
+                    except StopIteration:
+                        return False
+                    frame = fetch_ohlcv(symbol, tf)
+                    if frame is None or len(frame) < 50:
+                        self._scan_errors += 1
+                        return True
+                    pending[executor.submit(_scan_preloaded, symbol, tf, frame, settings_rev)] = symbol
+                    return True
+
+                while len(pending) < max_pending and submit_next():
+                    pass
+
+                while pending:
+                    completed, _ = wait(pending, return_when=FIRST_COMPLETED)
+                    for future in completed:
+                        symbol = pending.pop(future)
+                        try:
+                            result = future.result()
+                            if result is not None:
+                                display = symbol.replace(".NS", "")
+                                new_results[tf][display] = result
+                                published = self._results.get(tf, {}).copy()
+                                published[display] = result
+                                self._results[tf] = published
+                        except Exception as exc:
+                            logger.error("Scan error %s/%s: %s", symbol, tf, exc)
+                            self._scan_errors += 1
+                        while len(pending) < max_pending and submit_next():
+                            pass
+
+                # Publish a precomputed snapshot after each complete timeframe.
+                # HTTP readers never compete with process-pool result decoding.
+                signal_snapshot = self._build_signals()
+                trades_snapshot = self._build_active_trades()
+                leaderboard_snapshot = self._build_leaderboard()
+                with self._signals_lock:
+                    self._signals_cache = signal_snapshot
+                with self._api_cache_lock:
+                    self._trades_cache = trades_snapshot
+                    self._leaderboard_cache = leaderboard_snapshot
+
+            # Final copy-on-write merge keeps the complete generation visible.
+            for tf in tfs_to_scan:
+                merged = self._results.get(tf, {}).copy()
+                merged.update(new_results[tf])
+                self._results[tf] = merged
+            with self._chart_lock:
+                self._chart_cache = {
+                    key: value for key, value in self._chart_cache.items()
+                    if key[1] not in tfs_to_scan
+                }
 
             # Process database state tracking (buffering & repaints)
             db = SessionLocal()
@@ -565,6 +677,17 @@ class ScannerEngine:
                 for tf in tfs_to_scan:
                     for sym, result in new_results[tf].items():
                         self._process_db_state(db, sym, tf, result)
+                # Housekeeping: signal states are per-candle scratch rows and
+                # previously accumulated forever.
+                cleanup_cutoff = ist_now().replace(tzinfo=None) - pd.Timedelta(days=7)
+                db.query(SignalState).filter(SignalState.first_seen_time < cleanup_cutoff).delete()
+                # Legacy hygiene: rows written with ".NS" symbols can never be
+                # matched by the engine (it queries stripped names), so ACTIVE
+                # ones would stay open forever. Close them explicitly.
+                for zombie in db.query(Trade).filter(Trade.status == "ACTIVE", Trade.symbol.like("%.NS")).all():
+                    zombie.status = "CLOSED"
+                    zombie.exit_reason = "LEGACY_SYMBOL_CLEANUP"
+                    zombie.exit_time = ist_now().replace(tzinfo=None)
                 db.commit()
             except Exception as e:
                 db.rollback()
@@ -574,115 +697,119 @@ class ScannerEngine:
 
             self._last_scan = ist_now()
             self._pending_events = self._diff_states(prev_states)
+            self._analytics_cache.clear()
+            for tenure in ("1d", "7d", "30d", "90d", "180d", "365d"):
+                self.get_analytics(tenure)
+            signal_snapshot = self._build_signals()
+            trades_snapshot = self._build_active_trades()
+            leaderboard_snapshot = self._build_leaderboard()
+            with self._signals_lock:
+                self._signals_cache = signal_snapshot
+            with self._api_cache_lock:
+                self._trades_cache = trades_snapshot
+                self._leaderboard_cache = leaderboard_snapshot
             logger.info(f"Scan done. errors={self._scan_errors} events={len(self._pending_events)}")
         finally:
-            self._scanning = False
+            scan_latency_ms = (time.monotonic() - scan_started_monotonic) * 1000.0
+            with self._scan_state_lock:
+                self._scan_latency_ms = scan_latency_ms
+                self._scanning = False
+            logger.info(
+                "Scan cycle %s finished in %.1fms",
+                self._scan_count,
+                scan_latency_ms,
+            )
 
     def _process_db_state(self, db, sym, tf, result: SymbolResult):
         from datetime import datetime
         lt = result.latest
         state = str(lt.get("state", ""))
         sig = str(lt.get("signal", ""))
-        
-        # Parse timestamp safely
+
+        # All DB times are naive IST (SQLite drops tzinfo; mixing server-local
+        # datetime.now() with tz-aware bar times broke candle_timestamp lookups).
+        def naive_ist_now() -> datetime:
+            return ist_now().replace(tzinfo=None)
+
         try:
-            current_ts = datetime.fromisoformat(str(lt.get("bar_open_time")))
+            parsed = pd.Timestamp(str(lt.get("bar_open_time")))
+            parsed = parsed.tz_localize(IST_TZ) if parsed.tz is None else parsed.tz_convert(IST_TZ)
+            current_ts = parsed.to_pydatetime().replace(tzinfo=None)
         except Exception:
-            current_ts = datetime.now()
-            
+            current_ts = naive_ist_now()
+
         try:
             active_db_trade = db.query(Trade).filter_by(symbol=sym, timeframe=tf, status="ACTIVE").first()
         except Exception as e:
             logger.error(f"Database error fetching active trade for {sym}/{tf}: {e}")
             active_db_trade = None
 
-        # 1. Manage Signal Buffering
-        if state == "PENDING" and sig in ("BUY", "SELL"):
+        # A PENDING signal is an APEX order intent, not a position.
+        pending_dir = sig
+        if state == "PENDING" and not pending_dir and result.pending_order is not None:
+            pending_dir = "BUY" if result.pending_order.get("is_long") else "SELL"
+        if state == "PENDING" and pending_dir in ("BUY", "SELL"):
             try:
                 ss = db.query(SignalState).filter_by(symbol=sym, timeframe=tf, candle_timestamp=current_ts).first()
                 if not ss:
-                    ss = SignalState(symbol=sym, timeframe=tf, signal_dir=sig, first_seen_time=datetime.now(), candle_timestamp=current_ts)
+                    ss = SignalState(symbol=sym, timeframe=tf, signal_dir=pending_dir, first_seen_time=naive_ist_now(), candle_timestamp=current_ts)
                     db.add(ss)
                     db.flush()
-                
-                buffer_sec = 90 if tf == "15m" else 300
-                if (datetime.now() - ss.first_seen_time).total_seconds() >= buffer_sec and not ss.is_executed:
-                    ss.is_executed = True
-                    
-                    # Force Execute Trade!
-                    expected_dur = _EXPECTED_DURATION_HRS[tf] if tf in _EXPECTED_DURATION_HRS else 2.0
-                    tr = Trade(
-                        symbol=sym, timeframe=tf, direction=sig, 
-                        entry_time=datetime.now(), entry_price=lt.get("close"),
-                        sl1=lt.get("sl1"), tp1=lt.get("tp1"), tsl=lt.get("sl1"),
-                        trade_type=_trade_type(tf, datetime.now(), sig, expected_dur)
-                    )
-                    db.add(tr)
-                    active_db_trade = tr # set this so the logic below picks it up immediately
+
+                ss.is_executed = True
             except Exception as e:
                 logger.error(f"Database error managing signal state for {sym}/{tf}: {e}")
 
-        # 2. Sync Active DB Trade with Engine Result
-        if active_db_trade:
-            try:
-                if state == "CLOSED" and lt.get("exit_reason"):
-                    # Normal exit (SL/TP)
-                    active_db_trade.status = "CLOSED"
-                    active_db_trade.exit_reason = lt.get("exit_reason")
-                    active_db_trade.exit_time = datetime.now()
-                    active_db_trade.exit_price = lt.get("close")
-                elif state not in ("ACTIVE", "PENDING", "CLOSED"):
-                    # Repaint Exit! Engine sees no trade, but we had one live.
-                    active_db_trade.status = "CLOSED"
-                    active_db_trade.exit_reason = "REPAINT_EXIT"
-                    active_db_trade.exit_time = datetime.now()
-                    active_db_trade.exit_price = lt.get("close")
-                    
-                    # Override result so diff_states emits EXIT
-                    lt["state"] = "CLOSED"
-                    lt["exit_reason"] = "REPAINT_EXIT"
-                else:
-                    # Still Active. Override engine values with true DB entry price
-                    lt["state"] = "ACTIVE"
-                    lt["entry_price"] = active_db_trade.entry_price
-                    lt["active_direction"] = active_db_trade.direction
-                    
-                    # Recalculate PNL using the true DB entry price
-                    current_price = float(lt.get("close", 0.0))
-                    if active_db_trade.direction in ("LONG", "BUY"):
-                        pnl_pct = (current_price - active_db_trade.entry_price) / active_db_trade.entry_price * 100.0 if active_db_trade.entry_price > 0 else 0.0
-                        pnl_abs = current_price - active_db_trade.entry_price
-                    else:
-                        pnl_pct = (active_db_trade.entry_price - current_price) / active_db_trade.entry_price * 100.0 if active_db_trade.entry_price > 0 else 0.0
-                        pnl_abs = active_db_trade.entry_price - current_price
-                    lt["live_pnl_pct"] = pnl_pct
-                    lt["live_pnl_abs"] = pnl_abs
+        # APEX is the sole source of truth for position lifecycle and levels.
+        try:
+            active = result.active_trade
+            if state == "ACTIVE" and active is not None:
+                direction = "BUY" if active.direction == "LONG" else "SELL"
+                if active_db_trade is None:
+                    active_db_trade = Trade(
+                        symbol=sym, timeframe=tf, direction=direction,
+                        entry_time=pd.Timestamp(active.entry_time).to_pydatetime().replace(tzinfo=None),
+                        entry_price=active.entry_price, status="ACTIVE",
+                    )
+                    db.add(active_db_trade)
 
-                    if result.active_trade:
-                        result.active_trade.entry_price = active_db_trade.entry_price
-                        active_db_trade.tsl = result.active_trade.tsl
-                    else:
-                        # Engine is still PENDING, we must fabricate active_trade for the frontend payload
-                        result.active_trade = ActiveTrade(
-                            direction="LONG" if active_db_trade.direction == "BUY" else "SHORT",
-                            signal_time=current_ts, entry_time=active_db_trade.entry_time, entry_bar=0,
-                            entry_price=active_db_trade.entry_price, sl1=active_db_trade.sl1, sl2=active_db_trade.sl1,
-                            tsl=active_db_trade.tsl, tp1=active_db_trade.tp1, tp2=active_db_trade.tp1, tp3=active_db_trade.tp1,
-                            setup="DB_BUFFERED", stop_mode="ATR", option_type="CE", option_strike=0,
-                            peak_price=active_db_trade.entry_price, trough_price=active_db_trade.entry_price
-                        )
-            except Exception as e:
-                logger.error(f"Database error syncing active trade for {sym}/{tf}: {e}")
+                active_db_trade.direction = direction
+                active_db_trade.entry_time = pd.Timestamp(active.entry_time).to_pydatetime().replace(tzinfo=None)
+                active_db_trade.entry_price = active.entry_price
+                active_db_trade.signal_time = pd.Timestamp(active.signal_time).to_pydatetime().replace(tzinfo=None)
+                active_db_trade.entry_bar = active.entry_bar
+                active_db_trade.sl1, active_db_trade.sl2, active_db_trade.tsl = active.sl1, active.sl2, active.tsl
+                active_db_trade.tp1, active_db_trade.tp2, active_db_trade.tp3 = active.tp1, active.tp2, active.tp3
+                active_db_trade.setup, active_db_trade.stop_mode = active.setup, active.stop_mode
+                active_db_trade.option_type, active_db_trade.option_strike = active.option_type, _safe(active.option_strike)
+                active_db_trade.t1_hit, active_db_trade.t2_hit, active_db_trade.t3_hit = active.t1_hit, active.t2_hit, active.t3_hit
+                active_db_trade.profit_locked = active.profit_locked
+                active_db_trade.peak_price, active_db_trade.trough_price = active.peak_price, active.trough_price
+                active_db_trade.exit_confirmation_count = active.exit_confirmation_count
+                active_db_trade.trade_type = _trade_type(tf, active.entry_time, direction, _EXPECTED_DURATION_HRS.get(tf, 2.0))
+            elif active_db_trade is not None and state == "FLAT":
+                matching_exit = None
+                for record in reversed(result.trades or []):
+                    record_entry = pd.Timestamp(record.entry_time).to_pydatetime().replace(tzinfo=None)
+                    if record_entry == active_db_trade.entry_time:
+                        matching_exit = record
+                        break
+                if matching_exit is not None:
+                    active_db_trade.status = "CLOSED"
+                    active_db_trade.exit_reason = matching_exit.exit_reason
+                    active_db_trade.exit_price = matching_exit.exit_price
+                    active_db_trade.exit_time = pd.Timestamp(matching_exit.exit_time).to_pydatetime().replace(tzinfo=None)
+                    active_db_trade.pnl = matching_exit.pnl_pct
+                elif lt.get("exit_reason"):
+                    logger.warning("Ignoring unpaired APEX exit for %s/%s; no matching APEX trade record", sym, tf)
+        except Exception as e:
+            logger.error(f"Database error projecting APEX state for {sym}/{tf}: {e}")
 
     def _fetch_and_scan(self, symbol: str, timeframe: str) -> Optional[SymbolResult]:
+        from settings_store import revision as settings_revision
         df = fetch_ohlcv(symbol, timeframe)
-        if df is None or len(df) < 50:
-            return None
-        display = symbol.replace(".NS", "")
         try:
-            return _SCANNERS[timeframe].run_symbol(
-                display, df, asset_type="stock"
-            )
+            return _scan_preloaded(symbol, timeframe, df, settings_revision())
         except Exception as exc:
             logger.warning(f"ApexScanner failed {symbol}/{timeframe}: {exc}")
             return None
@@ -690,6 +817,37 @@ class ScannerEngine:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def get_signals(
+        self,
+        timeframe: Optional[str] = None,
+        direction: Optional[str] = None,
+    ) -> dict:
+        """Return a cheap filtered view of the latest precomputed signal snapshot."""
+        with self._signals_lock:
+            base = self._signals_cache
+        if base is None:
+            base = self._build_signals()
+            with self._signals_lock:
+                self._signals_cache = base
+
+        direction_upper = direction.upper() if direction else None
+        signals = [
+            signal for signal in base["signals"]
+            if (not timeframe or timeframe not in TIMEFRAMES or signal["timeframe"] == timeframe)
+            and (not direction_upper or signal["direction"] == direction_upper)
+        ]
+        payload = dict(base)
+        payload.update({
+            "signals": signals,
+            "last_scan": _ts(self._last_scan),
+            "scanning": self._scanning,
+            "total_signals": len(signals),
+            "buy_signals": sum(1 for signal in signals if signal["direction"] == "BUY"),
+            "sell_signals": sum(1 for signal in signals if signal["direction"] == "SELL"),
+            "active_trades": sum(1 for signal in signals if signal["state"] == "ACTIVE"),
+        })
+        return payload
+
+    def _build_signals(
         self,
         timeframe: Optional[str] = None,
         direction: Optional[str] = None,
@@ -749,21 +907,22 @@ class ScannerEngine:
                 age = _trade_age_hrs(entry_ts)
                 eta = _eta_hrs(tf, age)
 
-                entry_price = _safe(lt.get("entry_price") or lt.get("close"))
-                sl1 = _safe(lt.get("sl1") or lt.get("planned_sl1"))
+                entry_price = _first_num(lt.get("entry_price"), lt.get("close"))
+                sl1 = _first_num(lt.get("sl1"), lt.get("planned_sl1"))
                 sl_distance_pct = None
                 if entry_price and sl1 and entry_price > 0:
                     sl_distance_pct = round(abs(entry_price - sl1) / entry_price * 100, 2)
 
                 transition = ""
-                if tf in ("15m", "1h") and state == "ACTIVE" and entry_ts:
+                if tf in ("15m", "1h") and state == "ACTIVE" and entry_ts is not None:
                     try:
-                        now_dt = datetime.now(IST)
-                        # entry_ts is epoch seconds or string? _ts returns int epoch. 
-                        # pd.to_datetime handles both.
-                        entry_dt = pd.to_datetime(entry_ts, unit='s' if isinstance(entry_ts, (int, float)) else None).tz_localize("UTC").tz_convert(IST)
-                        if entry_dt.date() == now_dt.date() and now_dt.hour == 15 and now_dt.minute >= 15:
-                            transition = "BTST"
+                        now_dt = datetime.now(IST_TZ)
+                        entry_dt = pd.Timestamp(entry_ts)
+                        entry_dt = entry_dt.tz_localize(IST_TZ) if entry_dt.tz is None else entry_dt.tz_convert(IST_TZ)
+                        # From 15:15 an intraday position becomes a carry decision:
+                        # BTST for longs; cash shorts CANNOT be carried overnight.
+                        if entry_dt.date() == now_dt.date() and (now_dt.hour, now_dt.minute) >= (15, 15):
+                            transition = "BTST" if display_dir == "BUY" else "MUST_EXIT"
                     except Exception:
                         pass
 
@@ -774,16 +933,16 @@ class ScannerEngine:
                     "direction": display_dir,
                     "score": round(score, 1),
                     "state": state,
-                    "entry": _safe(lt.get("entry_price") or lt.get("close")),
-                    "entry_price": _safe(lt.get("entry_price") or lt.get("close")),
-                    "sl1": _safe(lt.get("sl1") or lt.get("planned_sl1")),
-                    "sl2": _safe(lt.get("sl2")),
-                    "tp1": _safe(lt.get("tp1") or lt.get("planned_tp1")),
-                    "tp2": _safe(lt.get("tp2") or lt.get("planned_tp2")),
-                    "tp3": _safe(lt.get("tp3") or lt.get("planned_tp3")),
+                    "entry": _tick(entry_price),
+                    "entry_price": _tick(entry_price),
+                    "sl1": _tick(sl1),
+                    "sl2": _tick(_safe(lt.get("sl2"))),
+                    "tp1": _tick(_first_num(lt.get("tp1"), lt.get("planned_tp1"))),
+                    "tp2": _tick(_first_num(lt.get("tp2"), lt.get("planned_tp2"))),
+                    "tp3": _tick(_first_num(lt.get("tp3"), lt.get("planned_tp3"))),
                     "setup": str(lt.get("setup", "")),
                     "timestamp": _ts(lt.get("timestamp")),
-                    "signal_time": _ts(lt.get("timestamp")),
+                    "signal_time": _ts(entry_ts) if entry_ts is not None else _ts(lt.get("timestamp")),
                     "close": _safe(lt.get("close")) or 0.0,
                     "rsi": _safe(lt.get("rsi")),
                     "adx": _safe(lt.get("adx")),
@@ -799,8 +958,7 @@ class ScannerEngine:
                     "regime_1h": str(lt.get("regime_1h", "")),
                     "regime_4h": str(lt.get("regime_4h", "")),
                     "regime_1d": str(lt.get("regime_1d", "")),
-                    # ── New professional fields ──
-                    "intraday_or_swing": _trade_type(tf, lt.get("timestamp"), str(lt.get("signal", "")), _EXPECTED_DURATION_HRS[tf]),
+                    "intraday_or_swing": _trade_type(tf, entry_ts or lt.get("timestamp"), display_dir, _EXPECTED_DURATION_HRS[tf]),
                     "daily_move_pct": dmove,
                     "trade_age_hrs": age,
                     "eta_hrs": eta,
@@ -811,24 +969,14 @@ class ScannerEngine:
                     "transition": transition,
                 })
 
+        # Newest signal first, then highest score within identical timestamps.
+        signals.sort(key=lambda s: (s.get("signal_time") or "", s.get("score") or 0.0), reverse=True)
+
         buy_n  = sum(1 for s in signals if s["direction"] == "BUY")
         sell_n = sum(1 for s in signals if s["direction"] == "SELL")
         active_n = sum(1 for s in signals if s["state"] == "ACTIVE")
-        
-        # Calculate market breadth based on 1D signals
-        breadth_buy = 0
-        breadth_sell = 0
-        if "1d" in self._results:
-            for sym, result in self._results["1d"].items():
-                b = result.latest.get("bias", "")
-                if b == "BULLISH": breadth_buy += 1
-                elif b == "BEARISH": breadth_sell += 1
-                
-        breadth_total = breadth_buy + breadth_sell
-        market_breadth = {
-            "bullish_pct": round(breadth_buy / breadth_total * 100) if breadth_total > 0 else 50,
-            "bearish_pct": round(breadth_sell / breadth_total * 100) if breadth_total > 0 else 50,
-        }
+
+        market_breadth = self._market_breadth()
 
         return {
             "signals": signals,
@@ -841,7 +989,39 @@ class ScannerEngine:
             "market_breadth": market_breadth,
         }
 
+    def _market_breadth(self) -> dict:
+        """Bullish/bearish share of the universe from the daily-timeframe bias.
+
+        The engine emits "STR BULL"/"MILD BULL"/"STR BEAR"/"MILD BEAR"/"NEUTRAL";
+        the old exact comparison against "BULLISH"/"BEARISH" never matched.
+        """
+        breadth_buy = breadth_sell = 0
+        for _sym, result in self._results.get("1d", {}).items():
+            bias = str(result.latest.get("bias", ""))
+            if "BULL" in bias:
+                breadth_buy += 1
+            elif "BEAR" in bias:
+                breadth_sell += 1
+        total = breadth_buy + breadth_sell
+        return {
+            "bullish_pct": round(breadth_buy / total * 100) if total > 0 else 50,
+            "bearish_pct": round(breadth_sell / total * 100) if total > 0 else 50,
+            "bullish_count": breadth_buy,
+            "bearish_count": breadth_sell,
+            "sample": total,
+        }
+
     def get_active_trades(self) -> dict:
+        """Return the active-trades snapshot assembled by the scan worker."""
+        with self._api_cache_lock:
+            cached = self._trades_cache
+        if cached is None:
+            cached = self._build_active_trades()
+            with self._api_cache_lock:
+                self._trades_cache = cached
+        return cached
+
+    def _build_active_trades(self) -> dict:
         trades: list[dict] = []
 
         for tf in TIMEFRAMES:
@@ -880,11 +1060,11 @@ class ScannerEngine:
                         "direction": "BUY" if direction == "LONG" else "SELL",
                         "entry_price": round(entry, 2),
                         "current_price": round(current, 2),
-                        "sl1": _safe(active.sl1) or 0.0,
-                        "sl2": _safe(active.sl2),
-                        "tp1": _safe(active.tp1) or 0.0,
-                        "tp2": _safe(active.tp2),
-                        "tp3": _safe(active.tp3),
+                        "sl1": _tick(_safe(active.sl1)) or 0.0,
+                        "sl2": _tick(_safe(active.sl2)),
+                        "tp1": _tick(_safe(active.tp1)) or 0.0,
+                        "tp2": _tick(_safe(active.tp2)),
+                        "tp3": _tick(_safe(active.tp3)),
                         "pnl_pct": round(pnl_pct, 2),
                         "pnl_points": round(pnl_pts, 2),
                         "t1_hit": bool(active.t1_hit),
@@ -958,6 +1138,24 @@ class ScannerEngine:
         }
 
     def get_leaderboard(self, timeframe: Optional[str] = None) -> dict:
+        """Return a filtered view of the precomputed leaderboard snapshot."""
+        with self._api_cache_lock:
+            cached = self._leaderboard_cache
+        if cached is None:
+            cached = self._build_leaderboard()
+            with self._api_cache_lock:
+                self._leaderboard_cache = cached
+
+        rows = cached["rows"]
+        if timeframe and timeframe in TIMEFRAMES:
+            rows = [row for row in rows if row["timeframe"] == timeframe]
+        return {
+            "rows": rows,
+            "last_scan": _ts(self._last_scan),
+            "scanning": self._scanning,
+        }
+
+    def _build_leaderboard(self, timeframe: Optional[str] = None) -> dict:
         rows: list[dict] = []
         tfs = [timeframe] if (timeframe and timeframe in TIMEFRAMES) else TIMEFRAMES
 
@@ -965,6 +1163,10 @@ class ScannerEngine:
             for sym, result in self._results[tf].items():
                 lt = result.latest
                 score = _signal_score_from_result(result)
+                board_dir = str(lt.get("signal", ""))
+                if not board_dir:
+                    active_dir = str(lt.get("active_direction", ""))
+                    board_dir = "BUY" if active_dir == "LONG" else "SELL" if active_dir == "SHORT" else ""
                 rows.append({
                     "symbol": sym,
                     "sector": get_sector(sym),
@@ -986,7 +1188,7 @@ class ScannerEngine:
                     "regime_1h": str(lt.get("regime_1h", "")),
                     "regime_4h": str(lt.get("regime_4h", "")),
                     "regime_1d": str(lt.get("regime_1d", "")),
-                    "intraday_or_swing": _trade_type(tf, lt.get("timestamp"), str(lt.get("signal", "")), _EXPECTED_DURATION_HRS[tf]),
+                    "intraday_or_swing": _trade_type(tf, lt.get("timestamp"), board_dir, _EXPECTED_DURATION_HRS[tf]),
                     "daily_move_pct": _daily_move_pct(result),
                 })
 
@@ -1067,11 +1269,14 @@ class ScannerEngine:
                         "setup": tr.setup or lt.get("setup", ""),
                         "exit_reason": tr.exit_reason,
                         "bars_held": tr.bars_held,
-                        "intraday_or_swing": _trade_type(tf, tr.entry_time, tr.direction, _EXPECTED_DURATION_HRS[tf]),
+                        "intraday_or_swing": _trade_type(tf, tr.entry_time, tr.direction, _EXPECTED_DURATION_HRS[tf], exit_ts=tr.exit_time),
                     }
                     all_trades_by_tf[tf].append(t_dict)
                     all_trades_flat.append(t_dict)
 
+            # HONESTY RULE (audit N1): metrics come from real simulated trade
+            # records or they are 0.0 with insufficient_data=True. No metric in
+            # this endpoint may be synthesized from constants or win-rate math.
             tf_trades = all_trades_by_tf[tf]
             tf_closed_count = len(tf_trades)
             tf_wins = sum(1 for t in tf_trades if t["pnl_pct"] > 0)
@@ -1079,24 +1284,28 @@ class ScannerEngine:
             tf_gross_profit = sum(t["pnl_pct"] for t in tf_trades if t["pnl_pct"] > 0)
             tf_gross_loss = abs(sum(t["pnl_pct"] for t in tf_trades if t["pnl_pct"] < 0))
             tf_pnls = [t["pnl_pct"] for t in tf_trades]
-            tf_pnl_signal_ratios = [t.get("pnl_r", 0) for t in tf_trades if t.get("pnl_r", 0) != 0]
-            tf_kelly = [t.get("pnl_r", 1.5) * 12.0 for t in tf_trades if t.get("pnl_r", 0) > 0]
 
             win_rate = round(tf_wins / tf_closed_count * 100, 1) if tf_closed_count > 0 else 0.0
-            profit_factor = round(tf_gross_profit / tf_gross_loss, 2) if tf_gross_loss > 1e-6 else round(tf_gross_profit, 2) if tf_gross_profit > 0 else 1.65
-            
-            if len(tf_pnls) >= 2 and np.std(tf_pnls, ddof=1) > 1e-6:
-                sharpe = round(float(np.mean(tf_pnls) / np.std(tf_pnls, ddof=1) * math.sqrt(252)), 2)
-            elif len(tf_pnl_signal_ratios) > 0:
-                sharpe = round(float(np.mean(tf_pnl_signal_ratios) * math.sqrt(252)), 2)
+            profit_factor = round(tf_gross_profit / tf_gross_loss, 2) if tf_gross_loss > 1e-6 else 0.0
+
+            # Per-trade quality ratio (mean/std of trade PnL%). The previous
+            # value was annualized with sqrt(252) as if trades were daily
+            # returns, and fabricated entirely below ~2 trades.
+            if len(tf_pnls) >= 5 and np.std(tf_pnls, ddof=1) > 1e-6:
+                sharpe = round(float(np.mean(tf_pnls) / np.std(tf_pnls, ddof=1)), 2)
             else:
-                sharpe = round(1.75 + (win_rate - 50) * 0.03, 2) if win_rate > 0 else 0.0
+                sharpe = 0.0
 
             total_pnl = round(sum(tf_pnls), 2)
             avg_win = round(tf_gross_profit / tf_wins, 2) if tf_wins > 0 else 0.0
             avg_loss = round(tf_gross_loss / tf_losses, 2) if tf_losses > 0 else 0.0
-            payoff = round(avg_win / avg_loss, 2) if avg_loss > 0 else round(avg_win, 2)
-            avg_kelly = round(float(np.mean(tf_kelly)), 1) if tf_kelly else 12.5
+            payoff = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
+            if tf_closed_count >= 5 and avg_loss > 0 and payoff > 0:
+                w = win_rate / 100.0
+                kelly = w - (1.0 - w) / payoff
+                avg_kelly = round(max(0.0, min(kelly * 50.0, 30.0)), 1)
+            else:
+                avg_kelly = 0.0
 
             timeframe_stats[tf] = {
                 "timeframe": tf,
@@ -1111,6 +1320,7 @@ class ScannerEngine:
                 "avg_loss_pct": avg_loss,
                 "payoff_ratio": payoff,
                 "half_kelly_pct": avg_kelly,
+                "insufficient_data": tf_closed_count < 5,
             }
 
         all_closed = sum(timeframe_stats[tf]["num_trades"] for tf in TIMEFRAMES)
@@ -1118,10 +1328,10 @@ class ScannerEngine:
         all_losses = sum(timeframe_stats[tf]["losses"] for tf in TIMEFRAMES)
         all_win_rate = round(all_wins / all_closed * 100, 1) if all_closed > 0 else 0.0
         all_total_pnl = round(sum(timeframe_stats[tf]["total_pnl_pct"] for tf in TIMEFRAMES), 2)
-        valid_sharpes = [timeframe_stats[tf]["sharpe_ratio"] for tf in TIMEFRAMES if timeframe_stats[tf]["sharpe_ratio"] > 0]
-        all_sharpe = round(float(np.mean(valid_sharpes)), 2) if valid_sharpes else 1.85
+        valid_sharpes = [timeframe_stats[tf]["sharpe_ratio"] for tf in TIMEFRAMES if timeframe_stats[tf]["sharpe_ratio"] != 0]
+        all_sharpe = round(float(np.mean(valid_sharpes)), 2) if valid_sharpes else 0.0
         valid_pfs = [timeframe_stats[tf]["profit_factor"] for tf in TIMEFRAMES if timeframe_stats[tf]["profit_factor"] > 0]
-        all_pf = round(float(np.mean(valid_pfs)), 2) if valid_pfs else 2.15
+        all_pf = round(float(np.mean(valid_pfs)), 2) if valid_pfs else 0.0
 
         timeframe_stats["ALL"] = {
             "timeframe": "ALL",
@@ -1135,17 +1345,20 @@ class ScannerEngine:
             "avg_win_pct": round(float(np.mean([timeframe_stats[tf]["avg_win_pct"] for tf in TIMEFRAMES if timeframe_stats[tf]["avg_win_pct"] > 0])), 2) if any(timeframe_stats[tf]["avg_win_pct"] > 0 for tf in TIMEFRAMES) else 0.0,
             "avg_loss_pct": round(float(np.mean([timeframe_stats[tf]["avg_loss_pct"] for tf in TIMEFRAMES if timeframe_stats[tf]["avg_loss_pct"] > 0])), 2) if any(timeframe_stats[tf]["avg_loss_pct"] > 0 for tf in TIMEFRAMES) else 0.0,
             "payoff_ratio": round(float(np.mean([timeframe_stats[tf]["payoff_ratio"] for tf in TIMEFRAMES if timeframe_stats[tf]["payoff_ratio"] > 0])), 2) if any(timeframe_stats[tf]["payoff_ratio"] > 0 for tf in TIMEFRAMES) else 0.0,
-            "half_kelly_pct": round(float(np.mean([timeframe_stats[tf]["half_kelly_pct"] for tf in TIMEFRAMES if timeframe_stats[tf]["half_kelly_pct"] > 0])), 1) if any(timeframe_stats[tf]["half_kelly_pct"] > 0 for tf in TIMEFRAMES) else 12.5,
+            "half_kelly_pct": round(float(np.mean([timeframe_stats[tf]["half_kelly_pct"] for tf in TIMEFRAMES if timeframe_stats[tf]["half_kelly_pct"] > 0])), 1) if any(timeframe_stats[tf]["half_kelly_pct"] > 0 for tf in TIMEFRAMES) else 0.0,
+            "insufficient_data": all_closed < 5,
         }
 
-        # Strategy Type Breakdown (Intraday vs Swing vs BTST/STBT)
+        # Strategy Type Breakdown (Intraday vs Swing vs BTST/STBT).
+        # _trade_type returns title-case values; the old comparison against
+        # "INTRADAY" and the setup-string BTST search never matched anything.
         categories = {"INTRADAY": [], "SWING": [], "BTST_STBT": []}
         for tr in all_trades_flat:
-            setup = str(tr["setup"]).upper()
+            trade_type = str(tr.get("intraday_or_swing", ""))
             tf = tr["timeframe"]
-            if "BTST" in setup or "STBT" in setup:
+            if trade_type in ("BTST", "STBT"):
                 categories["BTST_STBT"].append(tr)
-            elif tf == "15m" or tr["intraday_or_swing"] == "INTRADAY" or "INTRADAY" in setup:
+            elif tf == "15m" or trade_type == "Intraday":
                 categories["INTRADAY"].append(tr)
             else:
                 categories["SWING"].append(tr)
@@ -1159,13 +1372,13 @@ class ScannerEngine:
             tot_pnl = round(sum(t["pnl_pct"] for t in tr_list), 2)
             gp = sum(t["pnl_pct"] for t in tr_list if t["pnl_pct"] > 0)
             gl = abs(sum(t["pnl_pct"] for t in tr_list if t["pnl_pct"] < 0))
-            pf = round(gp / gl, 2) if gl > 1e-6 else round(gp, 2) if gp > 0 else (1.75 if cnt > 0 else 0.0)
-            
+            pf = round(gp / gl, 2) if gl > 1e-6 else 0.0
+
             pnls = [t["pnl_pct"] for t in tr_list]
-            if len(pnls) >= 2 and np.std(pnls, ddof=1) > 1e-6:
-                sh = round(float(np.mean(pnls) / np.std(pnls, ddof=1) * math.sqrt(252)), 2)
+            if len(pnls) >= 5 and np.std(pnls, ddof=1) > 1e-6:
+                sh = round(float(np.mean(pnls) / np.std(pnls, ddof=1)), 2)
             else:
-                sh = round(1.65 + (0.4 if cat_name == "SWING" else 0.1), 2) if cnt > 0 else 0.0
+                sh = 0.0
 
             strategy_breakdown[cat_name] = {
                 "category": cat_name,
@@ -1220,23 +1433,27 @@ class ScannerEngine:
         weekly_pnl += round(live_active_pnl_pct, 2)
         monthly_pnl += round(live_active_pnl_pct, 2)
 
+        # live_abs_inr is the SAME live snapshot for every window (it is a
+        # per-share points sum, not INR — there is no position sizing yet).
+        # The old x2.4 / x6.8 weekly/monthly multipliers were pure fabrication.
+        live_points = round(live_active_pnl_abs, 2)
         period_breakdown = {
             "daily": {
                 "period": "Today (Daily)",
                 "pnl_pct": round(daily_pnl, 2),
-                "live_abs_inr": round(live_active_pnl_abs, 2),
+                "live_abs_inr": live_points,
                 "trades_closed": daily_trades,
             },
             "weekly": {
                 "period": "Last 7 Days (Weekly)",
                 "pnl_pct": round(weekly_pnl, 2),
-                "live_abs_inr": round(live_active_pnl_abs * 2.4, 2),
+                "live_abs_inr": live_points,
                 "trades_closed": weekly_trades,
             },
             "monthly": {
                 "period": "Last 30 Days (Monthly)",
                 "pnl_pct": round(monthly_pnl, 2),
-                "live_abs_inr": round(live_active_pnl_abs * 6.8, 2),
+                "live_abs_inr": live_points,
                 "trades_closed": monthly_trades,
             },
         }
@@ -1257,9 +1474,9 @@ class ScannerEngine:
         plot_days = min(days_limit, 365)
         for idx in range(plot_days, -1, -1):
             d = (now - pd.Timedelta(days=idx)).strftime("%Y-%m-%d")
+            # Realized trades only — unrealized live PnL no longer inflates
+            # today's point (it is reported separately in period_breakdown).
             pnl_day = round(day_pnls.get(d, 0.0), 2)
-            if idx == 0:
-                pnl_day = round(pnl_day + live_active_pnl_pct, 2)
             cumulative = round(cumulative + pnl_day, 2)
             equity_curve.append({
                 "date": d,
@@ -1281,10 +1498,10 @@ class ScannerEngine:
             s_wr = round(s_wins / s_cnt * 100, 1) if s_cnt > 0 else 0.0
             s_pnl = round(sum(t["pnl_pct"] for t in tlist), 2)
             s_pnls = [t["pnl_pct"] for t in tlist]
-            if len(s_pnls) >= 2 and np.std(s_pnls, ddof=1) > 1e-6:
-                s_sh = round(float(np.mean(s_pnls) / np.std(s_pnls, ddof=1) * math.sqrt(252)), 2)
+            if len(s_pnls) >= 5 and np.std(s_pnls, ddof=1) > 1e-6:
+                s_sh = round(float(np.mean(s_pnls) / np.std(s_pnls, ddof=1)), 2)
             else:
-                s_sh = round(1.5 + (s_wr - 50) * 0.03, 2)
+                s_sh = 0.0
             sectors_list.append({
                 "sector": sec,
                 "trades_count": s_cnt,
@@ -1294,14 +1511,14 @@ class ScannerEngine:
             })
         sectors_list.sort(key=lambda x: -x["total_pnl_pct"])
 
-        return {
+        payload = {
             "timeframe_breakdown": timeframe_stats,
             "strategy_breakdown": strategy_breakdown,
             "period_breakdown": period_breakdown,
             "equity_curve": equity_curve,
             "sector_performance": sectors_list,
             "summary": {
-                "total_symbols": len(self.get_symbols()),
+                "total_symbols": len(SCAN_SYMBOLS),
                 "total_active_trades": total_active,
                 "total_signals": total_signals,
                 "overall_win_rate_pct": all_win_rate,
@@ -1311,38 +1528,81 @@ class ScannerEngine:
                 "selected_tenure": raw_tenure.upper(),
                 "max_tenure_limit": "365D",
                 "last_scan": _ts(self._last_scan),
+                # Provenance so nobody mistakes these for broker-verified fills:
+                # trades are engine-simulated on a rolling candle window.
+                "data_basis": "SIMULATED_ROLLING_WINDOW",
             }
         }
+        self._analytics_cache[cache_key] = payload
+        return payload
+
+    @staticmethod
+    def _canonical_symbol(symbol: str) -> str:
+        return symbol.upper().replace(".NS", "")
+
+    def _find_result(self, symbol: str, timeframe: str) -> Optional[SymbolResult]:
+        canonical = self._canonical_symbol(symbol)
+        timeframe_results = self._results.get(timeframe, {})
+        direct = timeframe_results.get(canonical) or timeframe_results.get(symbol)
+        if direct is not None:
+            return direct
+        for result_symbol, result in timeframe_results.items():
+            if self._canonical_symbol(result_symbol) == canonical:
+                return result
+        return None
+
+    def _queue_chart_scan(self, symbol: str, timeframe: str) -> None:
+        """Warm one missing chart without blocking the HTTP request thread."""
+        if timeframe not in TIMEFRAMES or self._scanning:
+            return
+
+        canonical = self._canonical_symbol(symbol)
+        key = (canonical, timeframe)
+        with self._chart_lock:
+            if key in self._chart_pending:
+                return
+            self._chart_pending.add(key)
+
+        ticker = next(
+            (candidate for candidate in NIFTY236_SYMBOLS if self._canonical_symbol(candidate) == canonical),
+            symbol if symbol.upper().endswith(".NS") else f"{symbol}.NS",
+        )
+
+        def warm() -> None:
+            try:
+                result = self._fetch_and_scan(ticker, timeframe)
+                if result is not None:
+                    self._results.setdefault(timeframe, {})[canonical] = result
+                    with self._chart_lock:
+                        self._chart_cache.pop(key, None)
+            except Exception as exc:
+                logger.warning("Chart warm-up failed for %s/%s: %s", ticker, timeframe, exc)
+            finally:
+                with self._chart_lock:
+                    self._chart_pending.discard(key)
+
+        self._chart_executor.submit(warm)
 
     def get_chart_data(self, symbol: str, timeframe: str) -> dict:
         """Return OHLCV candles + signal markers for a symbol/timeframe."""
+        canonical = self._canonical_symbol(symbol)
+        cache_key = (canonical, timeframe)
         empty = {
             "symbol": symbol, "timeframe": timeframe,
             "candles": [], "signals": [], "current_price": None, "active_trade": None,
+            "scan_run_at": _ts(self._last_scan), "loading": True,
         }
 
-        tf_results = self._results.get(timeframe, {})
-
-        # Exact match first, then case-insensitive
-        result = tf_results.get(symbol)
+        result = self._find_result(symbol, timeframe)
         if result is None:
-            sym_up = symbol.upper().replace(".NS", "")
-            for k, v in tf_results.items():
-                if k.upper().replace(".NS", "") == sym_up:
-                    result = v
-                    break
-
-        if result is None:
-            # Perform on-demand scan if not cached yet
-            try:
-                result = self._fetch_and_scan(symbol, timeframe)
-                if result:
-                    self._results.setdefault(timeframe, {})[symbol] = result
-            except Exception as e:
-                logger.warning(f"On-demand scan failed for {symbol}/{timeframe}: {e}")
-
-        if result is None:
+            self._queue_chart_scan(symbol, timeframe)
             return empty
+
+        result_id = id(result)
+        with self._chart_lock:
+            cached = self._chart_cache.get(cache_key)
+            if cached is not None and cached[0] == result_id:
+                return cached[1]
 
         frame = result.frame
         candles: list[dict] = []
@@ -1410,7 +1670,7 @@ class ScannerEngine:
                 "score": _signal_score_from_result(result),
             }
 
-        return {
+        payload = {
             "symbol":        symbol,
             "timeframe":     timeframe,
             "candles":       candles[-500:] if len(candles) > 500 else candles,
@@ -1418,7 +1678,24 @@ class ScannerEngine:
             "current_price": _safe(result.latest.get("close")),
             "active_trade":  active_trade_info,
             "scan_run_at":   scan_run_at,
+            "loading":       False,
         }
+        encoded = json.dumps(payload, separators=(",", ":"), allow_nan=False)
+        with self._chart_lock:
+            self._chart_cache[cache_key] = (result_id, payload, encoded)
+        return payload
+
+    def get_chart_json(self, symbol: str, timeframe: str) -> str:
+        """Return a pre-encoded chart response so repeated polls avoid Pandas and JSON work."""
+        payload = self.get_chart_data(symbol, timeframe)
+        cache_key = (self._canonical_symbol(symbol), timeframe)
+        result = self._find_result(symbol, timeframe)
+        if result is not None:
+            with self._chart_lock:
+                cached = self._chart_cache.get(cache_key)
+                if cached is not None and cached[0] == id(result):
+                    return cached[2]
+        return json.dumps(payload, separators=(",", ":"), allow_nan=False)
 
     def get_stats(self) -> dict:
         active, pending, buy_s, sell_s = 0, 0, 0, 0
@@ -1437,16 +1714,33 @@ class ScannerEngine:
                     sell_s += 1
 
         ms = get_market_status()
+        with self._scan_state_lock:
+            scan_count = self._scan_count
+            scan_latency_ms = self._scan_latency_ms
+            scan_started_at = self._scan_started_at
+            scanning = self._scanning
+        try:
+            from data_provider import get_data_health
+            data_health = get_data_health()
+        except Exception:
+            data_health = None
         return {
-            "total_symbols":   len(NIFTY236_SYMBOLS),
+            "total_symbols":   len(SCAN_SYMBOLS),
             "active_trades":   active,
             "pending_signals": pending,
             "buy_signals":     buy_s,
             "sell_signals":    sell_s,
             "last_scan":       _ts(self._last_scan),
-            "scanning":        self._scanning,
+            "scanning":        scanning,
             "scan_errors":     self._scan_errors,
+            "scan_count":      scan_count,
+            "scan_latency_ms": scan_latency_ms,
+            "scan_started_at": _ts(scan_started_at),
             "timeframes":      TIMEFRAMES,
+            # The dashboard reads breadth from /api/stats; it previously only
+            # existed in /api/signals so the widget never rendered.
+            "market_breadth":  self._market_breadth(),
+            "data_health":     data_health,
             # Session info
             "session_status":  ms["session_status"],
             "market_open":     ms["market_open"],
@@ -1467,8 +1761,43 @@ class ScannerEngine:
                     break # one is enough to mark the timeframe active
         return active_tfs
 
+    def get_history(self, limit: int = 300) -> dict:
+        """Closed (exited / SL / target / repaint) trades from the DB log."""
+        limit = max(1, min(int(limit), 1000))
+        rows: list[dict] = []
+        db = SessionLocal()
+        try:
+            records = (
+                db.query(Trade)
+                .filter(Trade.status == "CLOSED")
+                .order_by(Trade.exit_time.desc())
+                .limit(limit)
+                .all()
+            )
+            for t in records:
+                rows.append({
+                    "id": t.id,
+                    "symbol": t.symbol.replace(".NS", ""),
+                    "timeframe": t.timeframe,
+                    "direction": t.direction,
+                    "trade_type": t.trade_type,
+                    "entry_time": t.entry_time.isoformat() if t.entry_time else None,
+                    "entry_price": _tick(_safe(t.entry_price)),
+                    "exit_time": t.exit_time.isoformat() if t.exit_time else None,
+                    "exit_price": _tick(_safe(t.exit_price)),
+                    "sl1": _tick(_safe(t.sl1)),
+                    "tp1": _tick(_safe(t.tp1)),
+                    "exit_reason": t.exit_reason or "",
+                    "pnl_pct": round(t.pnl, 2) if t.pnl is not None else None,
+                })
+        except Exception as exc:
+            logger.error(f"History query failed: {exc}")
+        finally:
+            db.close()
+        return {"trades": rows, "total": len(rows)}
+
     def get_symbols(self) -> dict:
         return {
-            "symbols":    [s.replace(".NS", "") for s in NIFTY236_SYMBOLS],
+            "symbols":    [s.replace(".NS", "") for s in SCAN_SYMBOLS],
             "timeframes": TIMEFRAMES,
         }

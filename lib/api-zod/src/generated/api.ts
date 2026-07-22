@@ -226,12 +226,90 @@ export const GetScannerStatsResponse = zod.object({
   "last_scan": zod.string().nullish(),
   "scanning": zod.boolean(),
   "scan_errors": zod.number(),
+  "scan_count": zod.number().describe('Number of scan cycles that have actually started since service startup'),
+  "scan_latency_ms": zod.number().nullable().describe('Monotonic duration of the most recently completed scan cycle in milliseconds'),
+  "scan_started_at": zod.string().nullable().describe('ISO timestamp when the current or most recent scan cycle started'),
   "timeframes": zod.array(zod.string()),
   "session_status": zod.string().describe('OPEN | PRE_OPEN | CLOSED | HOLIDAY | WEEKEND'),
   "market_open": zod.boolean(),
   "nse_time": zod.string(),
   "next_open": zod.string().nullish(),
   "next_close": zod.string().nullish()
+})
+
+
+/**
+ * @summary Get scanner performance analytics for a tenure
+ */
+export const getAnalyticsQueryTenureDefault = `30d`;
+
+export const GetAnalyticsQueryParams = zod.object({
+  "tenure": zod.coerce.string().default(getAnalyticsQueryTenureDefault).describe('Analytics tenure: 1d | 7d | 30d | 90d | 180d | 365d')
+})
+
+export const GetAnalyticsResponse = zod.object({
+  "timeframe_breakdown": zod.record(zod.string(), zod.object({
+  "timeframe": zod.string().optional(),
+  "category": zod.string().optional(),
+  "num_trades": zod.number().optional(),
+  "wins": zod.number().optional(),
+  "losses": zod.number().optional(),
+  "win_rate_pct": zod.number().optional(),
+  "profit_factor": zod.number().optional(),
+  "sharpe_ratio": zod.number().optional(),
+  "total_pnl_pct": zod.number().optional(),
+  "avg_win_pct": zod.number().optional(),
+  "avg_loss_pct": zod.number().optional(),
+  "payoff_ratio": zod.number().optional(),
+  "half_kelly_pct": zod.number().optional(),
+  "avg_trade_pnl_pct": zod.number().optional()
+})).optional(),
+  "strategy_breakdown": zod.record(zod.string(), zod.object({
+  "timeframe": zod.string().optional(),
+  "category": zod.string().optional(),
+  "num_trades": zod.number().optional(),
+  "wins": zod.number().optional(),
+  "losses": zod.number().optional(),
+  "win_rate_pct": zod.number().optional(),
+  "profit_factor": zod.number().optional(),
+  "sharpe_ratio": zod.number().optional(),
+  "total_pnl_pct": zod.number().optional(),
+  "avg_win_pct": zod.number().optional(),
+  "avg_loss_pct": zod.number().optional(),
+  "payoff_ratio": zod.number().optional(),
+  "half_kelly_pct": zod.number().optional(),
+  "avg_trade_pnl_pct": zod.number().optional()
+})).optional(),
+  "period_breakdown": zod.record(zod.string(), zod.object({
+  "period": zod.string().optional(),
+  "pnl_pct": zod.number().optional(),
+  "live_abs_inr": zod.number().optional(),
+  "trades_closed": zod.number().optional()
+})).optional(),
+  "equity_curve": zod.array(zod.object({
+  "date": zod.string().optional(),
+  "daily_pnl_pct": zod.number().optional(),
+  "equity_index": zod.number().optional()
+})).optional(),
+  "sector_performance": zod.array(zod.object({
+  "sector": zod.string().optional(),
+  "trades_count": zod.number().optional(),
+  "win_rate_pct": zod.number().optional(),
+  "total_pnl_pct": zod.number().optional(),
+  "sharpe_ratio": zod.number().optional()
+})).optional(),
+  "summary": zod.object({
+  "total_symbols": zod.number().optional(),
+  "total_active_trades": zod.number().optional(),
+  "total_signals": zod.number().optional(),
+  "overall_win_rate_pct": zod.number().optional(),
+  "overall_profit_factor": zod.number().optional(),
+  "overall_sharpe_ratio": zod.number().optional(),
+  "total_historical_trades": zod.number().optional(),
+  "selected_tenure": zod.string().optional(),
+  "max_tenure_limit": zod.string().optional(),
+  "last_scan": zod.string().nullish()
+}).optional()
 })
 
 

@@ -263,6 +263,73 @@ export interface ChartResponse {
   scan_run_at?: string | null;
 }
 
+export interface AnalyticsMetricBreakdown {
+  timeframe?: string;
+  category?: string;
+  num_trades?: number;
+  wins?: number;
+  losses?: number;
+  win_rate_pct?: number;
+  profit_factor?: number;
+  sharpe_ratio?: number;
+  total_pnl_pct?: number;
+  avg_win_pct?: number;
+  avg_loss_pct?: number;
+  payoff_ratio?: number;
+  half_kelly_pct?: number;
+  avg_trade_pnl_pct?: number;
+}
+
+export interface AnalyticsPeriodBreakdown {
+  period?: string;
+  pnl_pct?: number;
+  live_abs_inr?: number;
+  trades_closed?: number;
+}
+
+export interface AnalyticsEquityPoint {
+  date?: string;
+  daily_pnl_pct?: number;
+  equity_index?: number;
+}
+
+export interface AnalyticsSectorPerformance {
+  sector?: string;
+  trades_count?: number;
+  win_rate_pct?: number;
+  total_pnl_pct?: number;
+  sharpe_ratio?: number;
+}
+
+export interface AnalyticsSummary {
+  total_symbols?: number;
+  total_active_trades?: number;
+  total_signals?: number;
+  overall_win_rate_pct?: number;
+  overall_profit_factor?: number;
+  overall_sharpe_ratio?: number;
+  total_historical_trades?: number;
+  selected_tenure?: string;
+  max_tenure_limit?: string;
+  /** @nullable */
+  last_scan?: string | null;
+}
+
+export type AnalyticsResponseTimeframeBreakdown = {[key: string]: AnalyticsMetricBreakdown};
+
+export type AnalyticsResponseStrategyBreakdown = {[key: string]: AnalyticsMetricBreakdown};
+
+export type AnalyticsResponsePeriodBreakdown = {[key: string]: AnalyticsPeriodBreakdown};
+
+export interface AnalyticsResponse {
+  timeframe_breakdown?: AnalyticsResponseTimeframeBreakdown;
+  strategy_breakdown?: AnalyticsResponseStrategyBreakdown;
+  period_breakdown?: AnalyticsResponsePeriodBreakdown;
+  equity_curve?: AnalyticsEquityPoint[];
+  sector_performance?: AnalyticsSectorPerformance[];
+  summary?: AnalyticsSummary;
+}
+
 export interface StatsResponse {
   total_symbols: number;
   active_trades: number;
@@ -273,6 +340,18 @@ export interface StatsResponse {
   last_scan?: string | null;
   scanning: boolean;
   scan_errors: number;
+  /** Number of scan cycles that have actually started since service startup */
+  scan_count: number;
+  /**
+     * Monotonic duration of the most recently completed scan cycle in milliseconds
+     * @nullable
+     */
+  scan_latency_ms: number | null;
+  /**
+     * ISO timestamp when the current or most recent scan cycle started
+     * @nullable
+     */
+  scan_started_at: string | null;
   timeframes: string[];
   /** OPEN | PRE_OPEN | CLOSED | HOLIDAY | WEEKEND */
   session_status: string;
@@ -310,5 +389,12 @@ export type GetLeaderboardParams = {
  * @nullable
  */
 timeframe?: string | null;
+};
+
+export type GetAnalyticsParams = {
+/**
+ * Analytics tenure: 1d | 7d | 30d | 90d | 180d | 365d
+ */
+tenure?: string;
 };
 

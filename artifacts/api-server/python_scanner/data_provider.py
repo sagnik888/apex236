@@ -1,147 +1,634 @@
-"""Yahoo Finance data provider for Nifty 50 stocks (15-min delayed)."""
+"""Market data provider: AngelOne SmartAPI (live) primary, Yahoo Finance fallback.
+
+Architecture
+------------
+* 15m / 1h / 4h (intraday): AngelOne
+    - REST ``getCandleData`` bootstraps per-symbol history once per day
+      (pickled to ``angel_cache/`` so restarts are cheap)
+    - the WebSocket tick feed (``angel_feed``) supplies the live forming candle
+      and locally-built completed candles between REST refreshes
+    - a background healer re-fetches official candles to replace tick-built
+      ones and to repair gaps (WS downtime), rate-limit friendly
+    - 1h is resampled from Angel 1h REST history extended by live 15m data;
+      4h is resampled from 1h with NSE 09:15 session anchoring
+* 1d (large timeframe): Yahoo Finance (2y, auto-adjusted) as before
+* Fallback: any Angel failure (credentials, login, per-symbol data) falls back
+  to the original Yahoo batch path automatically.
+
+Fixes rolled into this rewrite (from the audit):
+  - cache entries are no longer re-stamped on read (freshness laundering)
+  - the single-symbol bulk fallback only caches when exactly one symbol
+    was requested (previously it could attribute data to the wrong symbol)
+  - the per-ticker "LTP injection" is gone; live prices now come from one
+    consistent source (the tick feed) for every consumer
+"""
 from __future__ import annotations
 
 import logging
+import multiprocessing
+import os
+import threading
+import time
+from datetime import datetime, time as dt_time, timedelta
+from pathlib import Path
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 import pandas as pd
-import yfinance as yf
 
 logger = logging.getLogger(__name__)
 
 IST = "Asia/Kolkata"
+_IST_TZ = ZoneInfo(IST)
+HERE = Path(__file__).resolve().parent
+ANGEL_CACHE_DIR = HERE / "angel_cache"
 
-# Yahoo Finance fetch config per logical timeframe
+# ── Yahoo fetch config (fallback + 1d) ───────────────────────────────────────
 _FETCH_CONFIG: dict[str, dict] = {
-    "15m": {"interval": "15m", "period": "60d"},   # max yfinance allows for 15m
+    "15m": {"interval": "15m", "period": "60d"},
     "1h":  {"interval": "1h",  "period": "2y"},
     "4h":  {"interval": "1h",  "period": "2y"},   # resample 1h → 4h
     "1d":  {"interval": "1d",  "period": "2y"},
 }
 
-# NSE-aligned 4h origin — ensures buckets start at 09:15 IST every day
-_4H_ORIGIN = pd.Timestamp("2000-01-03 09:15:00", tz=IST)
-
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+# NSE-aligned session origin — intraday buckets start at 09:15 IST every day
+_SESSION_ORIGIN = pd.Timestamp("2000-01-03 09:15:00", tz=IST)
 
 _BATCH_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
-_CACHE_TTL = 300
+
+_NSE_OPEN = dt_time(9, 15)
+_NSE_CLOSE = dt_time(15, 30)
+_LIVE_CACHE_TTL = 45
+_OFF_MARKET_CACHE_TTL = 300
+
+# ── Angel state ───────────────────────────────────────────────────────────────
+_ANGEL_MODE = os.getenv("APEX_DATA_SOURCE", "auto").lower()   # auto | angel | yahoo
+_ANGEL_DISABLED_UNTIL = 0.0          # monotonic; cooldown after hard failures
+_ANGEL_LOCK = threading.RLock()
+_ANGEL_TOKENS: dict[str, dict] = {}  # "RELIANCE.NS" -> {token, tradingsymbol}
+_ANGEL_15M: dict[str, pd.DataFrame] = {}   # completed 15m candles per symbol
+_ANGEL_1H: dict[str, pd.DataFrame] = {}    # completed 1h candles per symbol
+_BOOTSTRAP_STATE = {"15m": "idle", "1h": "idle"}  # idle|running|ready|failed
+_BOOTSTRAP_EVENTS = {"15m": threading.Event(), "1h": threading.Event()}
+_HEAL_QUEUE: set[str] = set()
+_HEAL_THREAD: Optional[threading.Thread] = None
+_LAST_SCAN_SOURCE: dict[tuple[str, str], str] = {}   # (symbol, timeframe) -> "angel" | "yahoo"
+
+_OHLCV_COLS = ["open", "high", "low", "close", "volume"]
+
+
+def _is_main_process() -> bool:
+    return multiprocessing.current_process().name == "MainProcess"
+
+
+def _now_ist() -> datetime:
+    return datetime.now(_IST_TZ)
+
+
+def _cache_ttl_seconds(now: Optional[datetime] = None) -> int:
+    now = now or _now_ist()
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=_IST_TZ)
+    else:
+        now = now.astimezone(_IST_TZ)
+    local_time = now.time().replace(tzinfo=None)
+    try:
+        from market_calendar import is_trading_day
+        trading_day = is_trading_day(now.date())
+    except Exception:
+        trading_day = now.weekday() < 5
+    return _LIVE_CACHE_TTL if trading_day and _NSE_OPEN <= local_time <= _NSE_CLOSE else _OFF_MARKET_CACHE_TTL
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Angel primary path
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _angel_enabled() -> bool:
+    if _ANGEL_MODE == "yahoo" or not _is_main_process():
+        return False
+    if time.monotonic() < _ANGEL_DISABLED_UNTIL:
+        return False
+    try:
+        from broker_angel import credentials_available
+        return credentials_available()
+    except Exception:
+        return False
+
+
+def _disable_angel(reason: str, cooldown: float = 300.0) -> None:
+    global _ANGEL_DISABLED_UNTIL
+    _ANGEL_DISABLED_UNTIL = time.monotonic() + cooldown
+    logger.error("Angel data source disabled for %.0fs: %s", cooldown, reason)
+
+
+def _angel_client():
+    from broker_angel import get_client
+    return get_client()
+
+
+def _ensure_tokens(symbols: list[str]) -> bool:
+    global _ANGEL_TOKENS
+    with _ANGEL_LOCK:
+        missing = [s for s in symbols if s not in _ANGEL_TOKENS]
+        if not missing:
+            return True
+        try:
+            resolved, unresolved = _angel_client().resolve(missing)
+            _ANGEL_TOKENS.update(resolved)
+            if unresolved:
+                logger.warning("Angel: %s unresolved symbols will use Yahoo: %s", len(unresolved), unresolved)
+            return True
+        except Exception as exc:
+            _disable_angel(f"token resolution failed: {exc}")
+            return False
+
+
+def _pickle_path(symbol: str, interval: str) -> Path:
+    safe = symbol.replace(".NS", "").replace("&", "_AND_").replace("-", "_")
+    return ANGEL_CACHE_DIR / f"{safe}__{interval}.pkl"
+
+
+def _load_pickle_if_fresh(symbol: str, interval: str) -> Optional[pd.DataFrame]:
+    path = _pickle_path(symbol, interval)
+    try:
+        if path.exists():
+            mtime = datetime.fromtimestamp(path.stat().st_mtime, _IST_TZ)
+            if mtime.date() >= (_now_ist() - timedelta(days=3)).date():
+                frame = pd.read_pickle(path)
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    return frame
+    except Exception:
+        pass
+    return None
+
+
+def _save_pickle(symbol: str, interval: str, frame: pd.DataFrame) -> None:
+    try:
+        ANGEL_CACHE_DIR.mkdir(exist_ok=True)
+        frame.to_pickle(_pickle_path(symbol, interval))
+    except Exception:
+        pass
+
+
+def _last_completed_15m_open(now: Optional[datetime] = None) -> Optional[pd.Timestamp]:
+    """Bar-open time of the most recently COMPLETED 15m candle."""
+    now = now or _now_ist()
+    day_open = now.replace(hour=9, minute=15, second=0, microsecond=0)
+    if now < day_open + timedelta(minutes=15):
+        return None  # today's first candle not complete yet (may be prior day; fine)
+    minutes = int((now - day_open).total_seconds() // 60)
+    completed_buckets = min(minutes // 15, 25)  # 25 buckets: 09:15..15:15
+    return pd.Timestamp(day_open + timedelta(minutes=(completed_buckets - 1) * 15))
+
+
+def _merge_frames(base: Optional[pd.DataFrame], extra: pd.DataFrame) -> pd.DataFrame:
+    if base is None or base.empty:
+        merged = extra
+    else:
+        merged = pd.concat([base, extra])
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    return merged
+
+
+def _drop_forming_bucket(frame: pd.DataFrame, minutes: int) -> pd.DataFrame:
+    """Remove the still-forming trailing candle from a REST result.
+
+    Angel's getCandleData includes the in-progress candle; the store must hold
+    COMPLETED candles only (the live forming candle comes from the tick feed).
+    """
+    if frame is None or frame.empty:
+        return frame
+    now = _now_ist()
+    last_open = frame.index[-1].to_pydatetime()
+    if last_open + timedelta(minutes=minutes) > now:
+        return frame.iloc[:-1]
+    return frame
+
+
+def _bootstrap_interval(symbols: list[str], interval: str, lookback_days: int) -> None:
+    """Fetch per-symbol history from Angel REST; runs on a background thread."""
+    store = _ANGEL_15M if interval == "15m" else _ANGEL_1H
+    state_key = interval
+    _BOOTSTRAP_STATE[state_key] = "running"
+    client = _angel_client()
+    now = _now_ist()
+    done = failed = 0
+    started = time.monotonic()
+    for symbol in symbols:
+        if symbol not in _ANGEL_TOKENS:
+            continue
+        try:
+            with _ANGEL_LOCK:
+                existing = store.get(symbol)
+            if existing is None:
+                existing = _load_pickle_if_fresh(symbol, interval)
+                if existing is not None:
+                    with _ANGEL_LOCK:
+                        store[symbol] = existing
+            fetch_from = now - timedelta(days=lookback_days)
+            if existing is not None and len(existing) > 50:
+                fetch_from = existing.index[-1].to_pydatetime() - timedelta(days=2)
+            frame = client.get_candles(_ANGEL_TOKENS[symbol]["token"], interval, fetch_from, now)
+            if frame is None:
+                failed += 1
+                continue
+            frame = _drop_forming_bucket(frame, 15 if interval == "15m" else 60)
+            if not frame.empty:
+                merged = _merge_frames(existing, frame)
+                with _ANGEL_LOCK:
+                    store[symbol] = merged
+                _save_pickle(symbol, interval, merged)
+            done += 1
+            if done % 40 == 0:
+                logger.info("Angel %s bootstrap: %s/%s symbols (%.0fs elapsed)",
+                            interval, done, len(symbols), time.monotonic() - started)
+        except Exception as exc:
+            failed += 1
+            logger.warning("Angel bootstrap %s/%s failed: %s", symbol, interval, exc)
+    _BOOTSTRAP_STATE[state_key] = "ready" if done > 0 else "failed"
+    _BOOTSTRAP_EVENTS[state_key].set()
+    logger.info("Angel %s bootstrap finished: ok=%s failed=%s in %.0fs",
+                interval, done, failed, time.monotonic() - started)
+
+
+def _start_bootstrap(symbols: list[str], interval: str, lookback_days: int) -> None:
+    if _BOOTSTRAP_STATE[interval] in ("running", "ready"):
+        return
+    _BOOTSTRAP_STATE[interval] = "running"
+    threading.Thread(
+        target=_bootstrap_interval,
+        args=(list(symbols), interval, lookback_days),
+        name=f"angel-bootstrap-{interval}",
+        daemon=True,
+    ).start()
+
+
+def _absorb_feed_candles(symbols: list[str]) -> None:
+    """Move tick-built completed candles from the feed into the 15m store."""
+    from angel_feed import get_feed
+    feed = get_feed()
+    if not feed.is_connected() and feed.seconds_since_last_packet() is None:
+        return
+    healed = 0
+    for symbol in symbols:
+        row = _ANGEL_TOKENS.get(symbol)
+        if not row:
+            continue
+        with _ANGEL_LOCK:
+            base = _ANGEL_15M.get(symbol)
+        last_ts = base.index[-1] if base is not None and len(base) else None
+        candles = feed.get_completed_candles(row["token"], since=last_ts)
+        if not candles:
+            continue
+        frame = pd.DataFrame(
+            [{"open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"], "volume": c["volume"]}
+             for c in candles],
+            index=pd.DatetimeIndex([pd.Timestamp(c["start"]) for c in candles]),
+        )
+        with _ANGEL_LOCK:
+            _ANGEL_15M[symbol] = _merge_frames(base, frame)
+        # Tick-built candles are approximations — queue official re-fetch.
+        _HEAL_QUEUE.add(symbol)
+        healed += 1
+    if healed:
+        _ensure_heal_thread()
+
+
+def _detect_gaps(symbols: list[str]) -> None:
+    """Queue symbols whose stored history lags the last completed candle."""
+    expected = _last_completed_15m_open()
+    if expected is None:
+        return
+    for symbol in symbols:
+        with _ANGEL_LOCK:
+            base = _ANGEL_15M.get(symbol)
+        if base is None or not len(base):
+            continue
+        if base.index[-1] < expected - pd.Timedelta(minutes=15):
+            _HEAL_QUEUE.add(symbol)
+    if _HEAL_QUEUE:
+        _ensure_heal_thread()
+
+
+def _ensure_heal_thread() -> None:
+    global _HEAL_THREAD
+    if _HEAL_THREAD is not None and _HEAL_THREAD.is_alive():
+        return
+
+    def _heal_loop() -> None:
+        client = _angel_client()
+        while True:
+            try:
+                symbol = _HEAL_QUEUE.pop()
+            except KeyError:
+                time.sleep(5)
+                continue
+            row = _ANGEL_TOKENS.get(symbol)
+            if not row:
+                continue
+            try:
+                with _ANGEL_LOCK:
+                    base = _ANGEL_15M.get(symbol)
+                frm = (_now_ist() - timedelta(days=5)) if base is None or not len(base) else \
+                    base.index[-1].to_pydatetime() - timedelta(hours=6)
+                frame = client.get_candles(row["token"], "15m", frm, _now_ist())
+                frame = _drop_forming_bucket(frame, 15) if frame is not None else None
+                if frame is not None and not frame.empty:
+                    with _ANGEL_LOCK:
+                        _ANGEL_15M[symbol] = _merge_frames(base, frame)
+            except Exception as exc:
+                logger.debug("heal %s failed: %s", symbol, exc)
+
+    _HEAL_THREAD = threading.Thread(target=_heal_loop, name="angel-heal", daemon=True)
+    _HEAL_THREAD.start()
+
+
+def _forming_candle_row(symbol: str) -> Optional[pd.DataFrame]:
+    """Current forming 15m candle from the tick feed as a one-row frame."""
+    row = _ANGEL_TOKENS.get(symbol)
+    if not row:
+        return None
+    from angel_feed import get_feed
+    candle = get_feed().get_forming_candle(row["token"])
+    if not candle:
+        return None
+    return pd.DataFrame(
+        [{"open": candle["open"], "high": candle["high"], "low": candle["low"],
+          "close": candle["close"], "volume": candle["volume"]}],
+        index=pd.DatetimeIndex([pd.Timestamp(candle["start"])]),
+    )
+
+
+def _angel_15m_frame(symbol: str) -> Optional[pd.DataFrame]:
+    with _ANGEL_LOCK:
+        base = _ANGEL_15M.get(symbol)
+        frame = base.copy() if base is not None else None
+    if frame is None or len(frame) < 50:
+        return None
+    forming = _forming_candle_row(symbol)
+    if forming is not None:
+        forming_start = forming.index[-1]
+        if forming_start >= frame.index[-1]:
+            overlap = frame.index >= forming_start
+            if overlap.any():
+                # A REST snapshot of the same bucket exists (e.g. the feed
+                # joined mid-candle). Union the two so no high/low/volume is
+                # lost: official open + widest range + max cumulative volume.
+                prior = frame.loc[overlap].iloc[-1]
+                forming.iloc[0, forming.columns.get_loc("open")] = prior["open"]
+                forming.iloc[0, forming.columns.get_loc("high")] = max(prior["high"], forming["high"].iloc[0])
+                forming.iloc[0, forming.columns.get_loc("low")] = min(prior["low"], forming["low"].iloc[0])
+                forming.iloc[0, forming.columns.get_loc("volume")] = max(prior["volume"], forming["volume"].iloc[0])
+                frame = frame.loc[~overlap]
+            frame = pd.concat([frame, forming])
+    return frame.tail(700)
+
+
+def _resample_intraday(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
+    rs = frame.resample(rule, origin=_SESSION_ORIGIN, closed="left", label="left").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna(subset=["open", "high", "low", "close"])
+    return rs[rs.index.hour.isin(range(9, 16))]
+
+
+def _angel_1h_frame(symbol: str, tail: int = 700) -> Optional[pd.DataFrame]:
+    with _ANGEL_LOCK:
+        base = _ANGEL_1H.get(symbol)
+        base = base.copy() if base is not None else None
+    m15 = _angel_15m_frame(symbol)
+    live_1h = _resample_intraday(m15, "60min") if m15 is not None else None
+    if base is not None and len(base) > 100:
+        if live_1h is not None and len(live_1h):
+            cutoff = base.index[-1] - pd.Timedelta(days=1)
+            merged = _merge_frames(base, live_1h[live_1h.index > cutoff])
+        else:
+            merged = base
+        return merged.tail(tail)
+    # 1h bootstrap not ready — a 15m-derived series still covers max_input_bars
+    return live_1h.tail(tail) if live_1h is not None and len(live_1h) > 100 else None
+
+
+def _angel_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+    if timeframe == "15m":
+        return _angel_15m_frame(symbol)
+    if timeframe == "1h":
+        return _angel_1h_frame(symbol)
+    if timeframe == "4h":
+        # The engine needs >=200 completed 4h candles (min_history_bars), i.e.
+        # ~1300 hourly bars. A 700-bar tail here starved the 4h scan into
+        # permanent FLAT across the whole universe.
+        hourly = _angel_1h_frame(symbol, tail=2000)
+        if hourly is None or len(hourly) < 100:
+            return None
+        return _resample_intraday(hourly, "4h").tail(450)
+    return None
+
+
+def get_data_health() -> dict:
+    """Freshness/completeness snapshot for health reporting."""
+    health: dict[str, object] = {
+        "source_mode": _ANGEL_MODE,
+        "angel_active": _angel_enabled(),
+        "bootstrap": dict(_BOOTSTRAP_STATE),
+        "heal_queue": len(_HEAL_QUEUE),
+        "symbols_cached_15m": len(_ANGEL_15M),
+        # Delayed-fallback count for INTRADAY timeframes only; 1d uses Yahoo
+        # by design and must not trip the health check.
+        "source_by_symbol_yahoo": len({
+            symbol for (symbol, timeframe), source in _LAST_SCAN_SOURCE.items()
+            if source == "yahoo" and timeframe in ("15m", "1h", "4h")
+        }),
+    }
+    try:
+        from angel_feed import get_feed
+        health["feed"] = get_feed().stats()
+    except Exception:
+        health["feed"] = None
+    return health
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Public API (used by scanner_engine)
+# ═══════════════════════════════════════════════════════════════════════════
 
 def prefetch_all_ohlcv(symbols: list[str], timeframes: list[str]) -> None:
-    """Pre-fetch all data using batch yfinance download to prevent rate limits."""
-    now = time.time()
-    for tf in timeframes:
-        cfg = _FETCH_CONFIG.get(tf)
-        if not cfg: continue
-        
+    """Prepare data for a scan pass over ``symbols`` × ``timeframes``."""
+    timeframes = [tf for tf in dict.fromkeys(timeframes) if tf in _FETCH_CONFIG]
+    angel_tfs = [tf for tf in timeframes if tf in ("15m", "1h", "4h")]
+    yahoo_tfs = [tf for tf in timeframes if tf == "1d"]
+
+    if angel_tfs and _angel_enabled():
         try:
-            logger.info(f"Batch downloading {len(symbols)} symbols for {tf}")
-            # Download in chunks of 50 to avoid rate limits and large URI
+            if _ensure_tokens(list(symbols)):
+                _start_bootstrap(list(symbols), "15m", lookback_days=120)
+                if any(tf in ("1h", "4h") for tf in angel_tfs):
+                    _start_bootstrap(list(symbols), "1h", lookback_days=360)
+                tokens = [_ANGEL_TOKENS[s]["token"] for s in symbols if s in _ANGEL_TOKENS]
+                from angel_feed import get_feed
+                get_feed().start(tokens)
+                if "15m" in angel_tfs and not _BOOTSTRAP_EVENTS["15m"].is_set():
+                    logger.info("Waiting for Angel 15m bootstrap (first run only)…")
+                    _BOOTSTRAP_EVENTS["15m"].wait(timeout=900)
+                _absorb_feed_candles(list(symbols))
+                _detect_gaps(list(symbols))
+        except Exception as exc:
+            _disable_angel(f"prefetch failure: {exc}")
+            yahoo_tfs = timeframes  # full Yahoo fallback this pass
+    elif angel_tfs:
+        yahoo_tfs = timeframes
+
+    if yahoo_tfs:
+        _yahoo_prefetch(symbols, yahoo_tfs)
+
+
+def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+    """OHLCV frame (IST bar-open index) for one symbol/timeframe, or None."""
+    if timeframe not in _FETCH_CONFIG:
+        raise ValueError(f"Unsupported timeframe: {timeframe!r}")
+
+    if timeframe in ("15m", "1h", "4h") and _angel_enabled():
+        try:
+            frame = _angel_fetch(symbol, timeframe)
+            if frame is not None and len(frame) >= 50:
+                _LAST_SCAN_SOURCE[(symbol, timeframe)] = "angel"
+                return frame.copy()
+        except Exception as exc:
+            logger.warning("Angel fetch failed %s/%s (%s); using Yahoo", symbol, timeframe, exc)
+
+    frame = _yahoo_fetch(symbol, timeframe)
+    if frame is not None:
+        _LAST_SCAN_SOURCE[(symbol, timeframe)] = "yahoo"
+    return frame
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Yahoo Finance path (fallback + 1d)
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _yahoo_prefetch(symbols: list[str], timeframes: list[str]) -> None:
+    """Batch-download Yahoo data for the requested timeframes."""
+    import yfinance as yf
+
+    now = time.time()
+    cache_ttl = _cache_ttl_seconds()
+
+    uncached: list[str] = []
+    for timeframe in dict.fromkeys(timeframes):
+        if timeframe not in _FETCH_CONFIG:
+            continue
+        all_fresh = all(
+            (entry := _BATCH_CACHE.get((symbol, timeframe))) is not None
+            and now - entry[0] < cache_ttl
+            for symbol in symbols
+        )
+        if all_fresh:
+            logger.info("Yahoo cache fresh for %s", timeframe)
+        else:
+            uncached.append(timeframe)
+
+    request_groups: dict[tuple[str, str], list[str]] = {}
+    for timeframe in uncached:
+        config = _FETCH_CONFIG[timeframe]
+        request_groups.setdefault((config["interval"], config["period"]), []).append(timeframe)
+
+    for (interval, period), logical_tfs in request_groups.items():
+        cache_timeframes = [
+            tf for tf, config in _FETCH_CONFIG.items()
+            if config["interval"] == interval and config["period"] == period
+        ]
+        labels = "/".join(logical_tfs)
+        try:
+            logger.info("Yahoo batch download %s symbols for %s", len(symbols), labels)
             chunk_size = 50
             df_bulk = pd.DataFrame()
             for i in range(0, len(symbols), chunk_size):
-                chunk = symbols[i:i+chunk_size]
-                logger.info(f"Downloading chunk {i//chunk_size + 1} for {tf} ({len(chunk)} symbols)")
+                chunk = symbols[i:i + chunk_size]
                 df_chunk = yf.download(
                     tickers=" ".join(chunk),
-                    interval=cfg["interval"],
-                    period=cfg["period"],
+                    interval=interval,
+                    period=period,
                     group_by="ticker",
                     threads=True,
                     auto_adjust=True,
-                    progress=False
+                    progress=False,
                 )
                 if df_chunk is not None and not df_chunk.empty:
-                    if df_bulk.empty:
-                        df_bulk = df_chunk
-                    else:
-                        df_bulk = pd.concat([df_bulk, df_chunk], axis=1)
-                time.sleep(1) # rate limit backoff
+                    df_bulk = df_chunk if df_bulk.empty else pd.concat([df_bulk, df_chunk], axis=1)
+                if i + chunk_size < len(symbols):
+                    time.sleep(1)
         except Exception as exc:
-            logger.warning(f"Bulk download failed for {tf}: {exc}")
+            logger.warning("Yahoo bulk download failed for %s: %s", labels, exc)
             continue
 
         if df_bulk is None or df_bulk.empty:
             continue
 
-        # fast_info must still be fetched per-ticker, but we can parallelize it safely 
-        # or skip it during batch if we want to avoid 100 requests. 
-        # Actually, let's just cache the bulk data here and let fetch_ohlcv handle LTP injection
-        
-        # Ensure we have a MultiIndex
         if not isinstance(df_bulk.columns, pd.MultiIndex):
-            # Fallback if only 1 symbol was passed (though here we pass many)
-            sym = symbols[0]
-            _BATCH_CACHE[(sym, tf)] = (now, df_bulk.copy())
+            # Flat columns only happen when a single ticker succeeded. Cache it
+            # only when we know which one it was (exactly one requested).
+            if len(symbols) == 1:
+                sym = symbols[0]
+                for timeframe in cache_timeframes:
+                    _BATCH_CACHE[(sym, timeframe)] = (now, df_bulk.copy())
+                    alt = sym[:-3] if sym.endswith(".NS") else sym + ".NS"
+                    _BATCH_CACHE[(alt, timeframe)] = (now, df_bulk.copy())
+            else:
+                logger.warning("Yahoo returned flat columns for a %s-symbol batch; skipping cache", len(symbols))
             continue
 
+        level0 = set(df_bulk.columns.levels[0])
         for sym in symbols:
+            ticker_key = sym if sym in level0 else None
+            if ticker_key is None and sym.endswith(".NS") and sym[:-3] in level0:
+                ticker_key = sym[:-3]
+            elif ticker_key is None and (sym + ".NS") in level0:
+                ticker_key = sym + ".NS"
+            if not ticker_key:
+                continue
             try:
-                # Extract the single ticker's dataframe
-                if sym in df_bulk.columns.levels[0]:
-                    sym_df = df_bulk[sym].dropna(how="all").copy()
-                    if not sym_df.empty:
-                        _BATCH_CACHE[(sym, tf)] = (now, sym_df)
+                sym_df = df_bulk[ticker_key].dropna(how="all").copy()
+                if sym_df.empty:
+                    continue
+                for timeframe in cache_timeframes:
+                    _BATCH_CACHE[(sym, timeframe)] = (now, sym_df)
+                    alt = sym[:-3] if sym.endswith(".NS") else sym + ".NS"
+                    _BATCH_CACHE[(alt, timeframe)] = (now, sym_df)
             except Exception:
                 pass
 
 
-def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
-    """Fetch OHLCV data for a symbol at the requested logical timeframe with batch caching."""
-    cfg = _FETCH_CONFIG.get(timeframe)
-    if not cfg:
-        raise ValueError(f"Unsupported timeframe: {timeframe!r}")
+def _yahoo_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
+    import yfinance as yf
 
+    cfg = _FETCH_CONFIG[timeframe]
     now = time.time()
+    cache_ttl = _cache_ttl_seconds()
     cache_key = (symbol, timeframe)
-    ticker = None
-    
-    # Try batch cache first
+
     raw = None
+    fetched_at = now
     if cache_key in _BATCH_CACHE:
         cached_time, cached_df = _BATCH_CACHE[cache_key]
-        if now - cached_time < _CACHE_TTL:
+        if now - cached_time < cache_ttl:
             raw = cached_df.copy()
+            fetched_at = cached_time
 
-    # Fallback to single fetch if not in cache
     if raw is None or raw.empty:
         try:
-            ticker = yf.Ticker(symbol)
-            raw = ticker.history(
-                interval=cfg["interval"],
-                period=cfg["period"],
-                auto_adjust=True,
-            )
+            raw = yf.Ticker(symbol).history(interval=cfg["interval"], period=cfg["period"], auto_adjust=True)
+            fetched_at = time.time()
         except Exception as exc:
-            logger.warning(f"yfinance fetch failed for {symbol}/{timeframe}: {exc}")
+            logger.warning("yfinance fetch failed for %s/%s: %s", symbol, timeframe, exc)
             return None
 
     if raw is None or raw.empty:
         return None
 
-    # Only inject real-time LTP when fetching a single ticker directly outside of batch cache
-    if ticker is not None:
-        try:
-            last_price = ticker.fast_info.get("last_price")
-            if not last_price:
-                last_price = ticker.fast_info.get("lastPrice")
-                
-            if last_price and last_price > 0:
-                raw.iloc[-1, raw.columns.get_loc("Close")] = last_price
-                if last_price > raw.iloc[-1, raw.columns.get_loc("High")]:
-                    raw.iloc[-1, raw.columns.get_loc("High")] = last_price
-                if last_price < raw.iloc[-1, raw.columns.get_loc("Low")]:
-                    raw.iloc[-1, raw.columns.get_loc("Low")] = last_price
-        except Exception as exc:
-            logger.debug(f"Could not fetch real-time LTP for {symbol}: {exc}")
-
     df = raw.rename(columns={
-        "Open": "open", "High": "high", "Low": "low",
-        "Close": "close", "Volume": "volume",
+        "Open": "open", "High": "high", "Low": "low", "Close": "close", "Volume": "volume",
     })
-
-    keep = [c for c in ("open", "high", "low", "close", "volume") if c in df.columns]
+    keep = [c for c in _OHLCV_COLS if c in df.columns]
     df = df[keep].copy()
     if "volume" not in df.columns:
         df["volume"] = 0.0
@@ -152,48 +639,21 @@ def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         df.index = df.index.tz_convert(IST)
 
     df = df.dropna(subset=["open", "high", "low", "close"])
-
-    mask_bad = (
-        (df["high"] < df["low"]) |
-        (df["close"] <= 0) |
-        (df["open"] <= 0)
-    )
-    if mask_bad.any():
-        df = df[~mask_bad]
+    bad = (df["high"] < df["low"]) | (df["close"] <= 0) | (df["open"] <= 0)
+    if bad.any():
+        df = df[~bad]
 
     if timeframe == "4h":
-        df = _resample_4h(df)
+        df = _resample_intraday(df, "4h")
 
     if df.empty or len(df) < 50:
         return None
 
-    _BATCH_CACHE[cache_key] = (now, df)
+    # Preserve the ORIGINAL fetch time so TTL measures data age, not access age.
+    _BATCH_CACHE[cache_key] = (fetched_at, df)
     return df.copy()
 
 
 def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Resample 1h bars to NSE-aligned 4h bars.
-
-    NSE trades 09:15–15:30. Using origin=09:15 IST creates buckets at:
-      09:15–13:15  (full 4h bar, the main trading session bar)
-      13:15–15:30  (partial bar — kept, contains closing action)
-    Bars outside these windows (overnight) are empty and dropped automatically.
-    """
-    rs = df.resample(
-        "4h",
-        origin=_4H_ORIGIN,
-        closed="left",
-        label="left",
-    ).agg({
-        "open":   "first",
-        "high":   "max",
-        "low":    "min",
-        "close":  "last",
-        "volume": "sum",
-    })
-    # Drop bars with no data (overnight/weekend empty buckets)
-    rs = rs.dropna(subset=["open", "high", "low", "close"])
-    # Keep only bars that start inside or near market hours (09:00–16:00 IST)
-    rs = rs[rs.index.hour.isin(range(9, 16))]
-    return rs
+    """Backwards-compatible alias used by older tests."""
+    return _resample_intraday(df, "4h")

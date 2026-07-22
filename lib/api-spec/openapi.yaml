@@ -130,6 +130,26 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/StatsResponse"
+  /analytics:
+    get:
+      operationId: getAnalytics
+      tags: [scanner]
+      summary: Get scanner performance analytics for a tenure
+      parameters:
+        - name: tenure
+          in: query
+          required: false
+          schema:
+            type: string
+            default: 30d
+          description: "Analytics tenure: 1d | 7d | 30d | 90d | 180d | 365d"
+      responses:
+        "200":
+          description: Scanner analytics snapshot
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyticsResponse"
   /symbols:
     get:
       operationId: getSymbols
@@ -587,6 +607,82 @@ components:
         - timeframe
         - candles
         - signals
+    AnalyticsMetricBreakdown:
+      type: object
+      properties:
+        timeframe: { type: string }
+        category: { type: string }
+        num_trades: { type: integer }
+        wins: { type: integer }
+        losses: { type: integer }
+        win_rate_pct: { type: number }
+        profit_factor: { type: number }
+        sharpe_ratio: { type: number }
+        total_pnl_pct: { type: number }
+        avg_win_pct: { type: number }
+        avg_loss_pct: { type: number }
+        payoff_ratio: { type: number }
+        half_kelly_pct: { type: number }
+        avg_trade_pnl_pct: { type: number }
+    AnalyticsPeriodBreakdown:
+      type: object
+      properties:
+        period: { type: string }
+        pnl_pct: { type: number }
+        live_abs_inr: { type: number }
+        trades_closed: { type: integer }
+    AnalyticsEquityPoint:
+      type: object
+      properties:
+        date: { type: string }
+        daily_pnl_pct: { type: number }
+        equity_index: { type: number }
+    AnalyticsSectorPerformance:
+      type: object
+      properties:
+        sector: { type: string }
+        trades_count: { type: integer }
+        win_rate_pct: { type: number }
+        total_pnl_pct: { type: number }
+        sharpe_ratio: { type: number }
+    AnalyticsSummary:
+      type: object
+      properties:
+        total_symbols: { type: integer }
+        total_active_trades: { type: integer }
+        total_signals: { type: integer }
+        overall_win_rate_pct: { type: number }
+        overall_profit_factor: { type: number }
+        overall_sharpe_ratio: { type: number }
+        total_historical_trades: { type: integer }
+        selected_tenure: { type: string }
+        max_tenure_limit: { type: string }
+        last_scan: { type: ["string", "null"] }
+    AnalyticsResponse:
+      type: object
+      properties:
+        timeframe_breakdown:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/AnalyticsMetricBreakdown"
+        strategy_breakdown:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/AnalyticsMetricBreakdown"
+        period_breakdown:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/AnalyticsPeriodBreakdown"
+        equity_curve:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsEquityPoint"
+        sector_performance:
+          type: array
+          items:
+            $ref: "#/components/schemas/AnalyticsSectorPerformance"
+        summary:
+          $ref: "#/components/schemas/AnalyticsSummary"
     StatsResponse:
       type: object
       properties:
@@ -606,6 +702,15 @@ components:
           type: boolean
         scan_errors:
           type: integer
+        scan_count:
+          type: integer
+          description: Number of scan cycles that have actually started since service startup
+        scan_latency_ms:
+          type: ["number", "null"]
+          description: Monotonic duration of the most recently completed scan cycle in milliseconds
+        scan_started_at:
+          type: ["string", "null"]
+          description: ISO timestamp when the current or most recent scan cycle started
         timeframes:
           type: array
           items:
@@ -629,6 +734,9 @@ components:
         - sell_signals
         - scanning
         - scan_errors
+        - scan_count
+        - scan_latency_ms
+        - scan_started_at
         - timeframes
         - session_status
         - market_open

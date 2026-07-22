@@ -10,6 +10,8 @@ import Dashboard from '@/pages/Dashboard';
 import Trades from '@/pages/Trades';
 import Analytics from '@/pages/Analytics';
 import ChartView from '@/pages/ChartView';
+import HistoryPage from '@/pages/History';
+import SettingsPage from '@/pages/SettingsPage';
 
 const queryClient = new QueryClient();
 
@@ -29,6 +31,8 @@ function Router() {
         <Route path="/" component={Dashboard} />
         <Route path="/trades" component={Trades} />
         <Route path="/analytics" component={Analytics} />
+        <Route path="/history" component={HistoryPage} />
+        <Route path="/settings" component={SettingsPage} />
         <Route path="/chart/:symbol/:timeframe" component={ChartView} />
         <Route component={NotFound} />
       </Switch>

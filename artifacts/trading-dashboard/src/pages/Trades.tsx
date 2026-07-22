@@ -1,10 +1,13 @@
 import { useGetTrades } from "@workspace/api-client-react";
 import type { ActiveTrade } from "@workspace/api-client-react";
 import { Link } from "wouter";
+import { useState } from "react";
 import {
   ArrowUpRight, ArrowDownRight, ArrowRight,
   TrendingUp, TrendingDown, Target, Shield, Clock, Timer, BarChart2
 } from "lucide-react";
+
+const INITIAL_TRADE_CARDS = 32;
 
 function fmtAge(hrs: number | null | undefined): string {
   if (hrs == null) return "—";
@@ -41,6 +44,7 @@ export default function Trades() {
   });
 
   const trades = data?.trades ?? [];
+  const [visibleCount, setVisibleCount] = useState(INITIAL_TRADE_CARDS);
   const intraday = trades.filter((t: ActiveTrade) => (t.intraday_or_swing as string) === "Intraday");
   const swing    = trades.filter((t: ActiveTrade) => (t.intraday_or_swing as string) === "Swing");
 
@@ -83,8 +87,9 @@ export default function Trades() {
             <p className="text-xs opacity-70 mt-1">Waiting for signal triggers.</p>
           </div>
         ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-            {trades.map((trade: ActiveTrade & Record<string, unknown>, i) => {
+          <div className="space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {trades.slice(0, visibleCount).map((trade: ActiveTrade & Record<string, unknown>, i) => {
               const isProfitable = trade.pnl_pct >= 0;
               const PnlIcon = isProfitable ? TrendingUp : TrendingDown;
               const isSwing = (trade.intraday_or_swing as string) === "Swing";
@@ -97,7 +102,11 @@ export default function Trades() {
               const tsl = trade.tsl as number | null | undefined;
 
               return (
-                <div key={`${trade.symbol}-${trade.timeframe}-${i}`} className="bg-card border border-border rounded-lg overflow-hidden flex flex-col">
+                <div
+                  key={`${trade.symbol}-${trade.timeframe}-${i}`}
+                  className="bg-card border border-border rounded-lg overflow-hidden flex flex-col"
+                  style={{ contentVisibility: "auto", containIntrinsicSize: "420px" }}
+                >
                   {/* Card Header */}
                   <div className="p-3 border-b border-border flex justify-between items-start bg-muted/20">
                     <div>
@@ -267,6 +276,18 @@ export default function Trades() {
                 </div>
               );
             })}
+            </div>
+            {visibleCount < trades.length && (
+              <div className="flex justify-center">
+                <button
+                  type="button"
+                  onClick={() => setVisibleCount((count) => Math.min(count + INITIAL_TRADE_CARDS, trades.length))}
+                  className="px-4 py-2 rounded-md border border-border bg-card text-sm font-medium text-foreground hover:bg-muted transition-colors"
+                >
+                  Show more positions ({trades.length - visibleCount} remaining)
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>

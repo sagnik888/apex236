@@ -16,6 +16,18 @@ export interface StatsResponse {
   last_scan?: string | null;
   scanning: boolean;
   scan_errors: number;
+  /** Number of scan cycles that have actually started since service startup */
+  scan_count: number;
+  /**
+     * Monotonic duration of the most recently completed scan cycle in milliseconds
+     * @nullable
+     */
+  scan_latency_ms: number | null;
+  /**
+     * ISO timestamp when the current or most recent scan cycle started
+     * @nullable
+     */
+  scan_started_at: string | null;
   timeframes: string[];
   /** OPEN | PRE_OPEN | CLOSED | HOLIDAY | WEEKEND */
   session_status: string;

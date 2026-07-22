@@ -1,14 +1,15 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Activity, LayoutDashboard, PieChart, Circle, BarChart3 } from "lucide-react";
+import { Activity, LayoutDashboard, PieChart, Circle, BarChart3, History, Settings } from "lucide-react";
 import { useGetScannerStats, useGetSession } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { NotificationBell, NotificationToasts } from "@/components/notifications/NotificationCenter";
+import { SystemHealthPanel } from "@/components/layout/SystemHealthPanel";
 
 // Scan interval by session (seconds) — mirrors backend logic
 function expectedScanInterval(sessionStatus: string): number {
-  if (sessionStatus === "OPEN")     return 300;   // 5 min
-  if (sessionStatus === "PRE_OPEN") return 600;   // 10 min
+  if (sessionStatus === "OPEN")     return 60;    // live 15m refresh
+  if (sessionStatus === "PRE_OPEN") return 60;    // do not miss 09:15 transition
   return 3600;                                    // 1 hour
 }
 
@@ -48,9 +49,10 @@ export function Shell({ children }: { children: React.ReactNode }) {
   const [location] = useLocation();
   useWebSocket();
 
-  const { data: stats } = useGetScannerStats({
+  const statsQuery = useGetScannerStats({
     query: { refetchInterval: 15000, queryKey: ["/api/stats"] }
   });
+  const stats = statsQuery.data;
   const { data: session } = useGetSession({
     query: { refetchInterval: 60000, queryKey: ["/api/session"] }
   });
@@ -63,11 +65,11 @@ export function Shell({ children }: { children: React.ReactNode }) {
   return (
     <div className="flex h-[100dvh] w-full flex-col bg-background text-foreground overflow-hidden">
       {/* Top Navbar */}
-      <header className="flex h-14 items-center justify-between border-b border-border bg-card px-4 shrink-0">
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-2 text-primary font-bold tracking-tight">
+      <header className="flex h-14 items-center justify-between gap-2 border-b border-border bg-card px-2 sm:px-4 shrink-0">
+        <div className="flex min-w-0 items-center gap-2 lg:gap-6">
+          <div className="flex shrink-0 items-center gap-2 text-primary font-bold tracking-tight">
             <Activity className="h-5 w-5" />
-            <span className="hidden sm:block">APEX NIFTY 100</span>
+            <span className="hidden sm:block">APEX NSE 236</span>
             <span className="sm:hidden">APEX</span>
           </div>
 
@@ -79,7 +81,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               }`}
             >
               <LayoutDashboard className="h-4 w-4" />
-              <span className="hidden sm:block">Scanner</span>
+              <span className="hidden lg:block">Scanner</span>
             </Link>
             <Link
               href="/trades"
@@ -88,7 +90,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
               }`}
             >
               <PieChart className="h-4 w-4" />
-              <span className="hidden sm:block">Active Trades</span>
+              <span className="hidden lg:block">Active Trades</span>
             </Link>
             <Link
               href="/analytics"
@@ -97,12 +99,30 @@ export function Shell({ children }: { children: React.ReactNode }) {
               }`}
             >
               <BarChart3 className="h-4 w-4" />
-              <span className="hidden sm:block">Performance</span>
+              <span className="hidden lg:block">Performance</span>
+            </Link>
+            <Link
+              href="/history"
+              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                location === "/history" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              <History className="h-4 w-4" />
+              <span className="hidden lg:block">History</span>
+            </Link>
+            <Link
+              href="/settings"
+              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                location === "/settings" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              <Settings className="h-4 w-4" />
+              <span className="hidden lg:block">Settings</span>
             </Link>
           </nav>
         </div>
 
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex shrink-0 items-center gap-1.5 lg:gap-2 text-sm">
           {/* NSE Market Session Badge */}
           <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded border text-xs font-bold tracking-wider
             ${marketOpen
@@ -117,25 +137,19 @@ export function Shell({ children }: { children: React.ReactNode }) {
           </div>
 
           {/* IST Clock — ticks every second client-side */}
-          <span className="text-muted-foreground text-xs font-mono hidden lg:block tabular-nums">
+          <span className="text-muted-foreground text-xs font-mono hidden min-[1360px]:block tabular-nums">
             {istClock} IST
           </span>
 
-          {/* Scan status / countdown */}
-          {stats?.scanning ? (
-            <div className="flex items-center gap-1.5 text-primary text-xs font-medium animate-pulse bg-primary/10 px-2 py-1 rounded">
-              <div className="h-2 w-2 rounded-full bg-primary animate-ping flex-shrink-0" />
-              <span className="hidden sm:block">Scanning…</span>
-            </div>
-          ) : (
-            <div className="hidden md:flex flex-col items-end leading-none">
-              <span className="text-[9px] uppercase text-muted-foreground font-semibold">Next scan</span>
-              <span className="font-mono text-xs tabular-nums text-foreground">{countdown}</span>
-            </div>
-          )}
+          <SystemHealthPanel
+            stats={stats}
+            isOffline={statsQuery.isError || statsQuery.failureCount > 0}
+            responseUpdatedAt={statsQuery.dataUpdatedAt}
+            nextScan={countdown}
+          />
 
           {/* Active / Signals counter */}
-          <div className="flex items-center gap-2 px-3 py-1 border border-border rounded bg-muted/30">
+          <div className="hidden sm:flex items-center gap-2 px-2 lg:px-3 py-1 border border-border rounded bg-muted/30">
             <div className="flex flex-col items-center">
               <span className="text-[9px] uppercase text-muted-foreground font-semibold leading-none">Active</span>
               <span className="font-mono text-sm leading-tight text-foreground">{stats?.active_trades ?? 0}</span>

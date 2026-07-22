@@ -157,7 +157,7 @@ export default function Analytics() {
         {/* Sharpe Ratio */}
         <div className="flex flex-col justify-between p-4 bg-card border border-border rounded-xl shadow-sm hover:border-primary/40 transition-all">
           <div className="flex items-center justify-between">
-            <span className="text-xs uppercase font-bold tracking-wider text-muted-foreground">Sharpe Ratio (Annualized)</span>
+            <span className="text-xs uppercase font-bold tracking-wider text-muted-foreground">Trade Sharpe (per-trade)</span>
             <div className="p-2 rounded-lg bg-purple-500/10 text-purple-400">
               <Target className="h-5 w-5" />
             </div>
@@ -438,9 +438,10 @@ export default function Analytics() {
                     }`}>
                       {(item.pnl_pct ?? 0) >= 0 ? "+" : ""}{item.pnl_pct ?? 0}%
                     </div>
+                    {/* points-per-share sum, not INR — no position sizing yet */}
                     {item.live_abs_inr !== undefined && (
                       <div className="text-[11px] text-muted-foreground">
-                        Live: ₹{item.live_abs_inr}
+                        Live: {item.live_abs_inr} pts (unsized)
                       </div>
                     )}
                   </div>

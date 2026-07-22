@@ -20,7 +20,9 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AnalyticsResponse,
   ChartResponse,
+  GetAnalyticsParams,
   GetLeaderboardParams,
   GetSignalsParams,
   HealthStatus,
@@ -618,6 +620,90 @@ export function useGetScannerStats<TData = Awaited<ReturnType<typeof getScannerS
 
 
 
+export const getGetAnalyticsUrl = (params?: GetAnalyticsParams,) => {
+  const normalizedParams = new URLSearchParams();
+
+  Object.entries(params || {}).forEach(([key, value]) => {
+
+    if (value !== undefined) {
+      normalizedParams.append(key, value === null ? 'null' : String(value))
+    }
+  });
+
+  const stringifiedParams = normalizedParams.toString();
+
+  return stringifiedParams.length > 0 ? `/api/analytics?${stringifiedParams}` : `/api/analytics`
+}
+
+/**
+ * @summary Get scanner performance analytics for a tenure
+ */
+export const getAnalytics = async (params?: GetAnalyticsParams, options?: RequestInit): Promise<AnalyticsResponse> => {
+
+  return customFetch<AnalyticsResponse>(getGetAnalyticsUrl(params),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetAnalyticsQueryKey = (params?: GetAnalyticsParams,) => {
+    return [
+    `/api/analytics`, ...(params ? [params] : [])
+    ] as const;
+    }
+
+
+export const getGetAnalyticsQueryOptions = <TData = Awaited<ReturnType<typeof getAnalytics>>, TError = ErrorType<unknown>>(params?: GetAnalyticsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalytics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetAnalyticsQueryKey(params);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getAnalytics>>> = ({ signal }) => getAnalytics(params, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getAnalytics>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetAnalyticsQueryResult = NonNullable<Awaited<ReturnType<typeof getAnalytics>>>
+export type GetAnalyticsQueryError = ErrorType<unknown>
+
+
+/**
+ * @summary Get scanner performance analytics for a tenure
+ */
+
+export function useGetAnalytics<TData = Awaited<ReturnType<typeof getAnalytics>>, TError = ErrorType<unknown>>(
+ params?: GetAnalyticsParams, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalytics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetAnalyticsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
 export const getGetSymbolsUrl = () => {
 
 
@@ -765,40 +851,4 @@ export const useTriggerScan = <TError = ErrorType<unknown>,
       > => {
       return useMutation(getTriggerScanMutationOptions(options));
     }
-
-
-export const getGetAnalyticsUrl = (params?: { tenure?: string }) => {
-  if (params?.tenure) {
-    return `/api/analytics?tenure=${encodeURIComponent(params.tenure)}`;
-  }
-  return `/api/analytics`;
-}
-
-export const getAnalytics = async (params?: { tenure?: string }, options?: RequestInit): Promise<any> => {
-  return customFetch<any>(getGetAnalyticsUrl(params), {
-    ...options,
-    method: 'GET'
-  });
-}
-
-export const getGetAnalyticsQueryKey = (params?: { tenure?: string }) => {
-  return [`/api/analytics`, params] as const;
-}
-
-export const getGetAnalyticsQueryOptions = <TData = Awaited<ReturnType<typeof getAnalytics>>, TError = ErrorType<unknown>>(params?: { tenure?: string }, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalytics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}) => {
-  const {query: queryOptions, request: requestOptions} = options ?? {};
-  const queryKey = queryOptions?.queryKey ?? getGetAnalyticsQueryKey(params);
-  const queryFn: QueryFunction<Awaited<ReturnType<typeof getAnalytics>>> = ({ signal }) => getAnalytics(params, { signal, ...requestOptions });
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<Awaited<ReturnType<typeof getAnalytics>>, TError, TData> & { queryKey: QueryKey }
-}
-
-export function useGetAnalytics<TData = Awaited<ReturnType<typeof getAnalytics>>, TError = ErrorType<unknown>>(
-  params?: { tenure?: string },
-  options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getAnalytics>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
-): UseQueryResult<TData, TError> & { queryKey: QueryKey } {
-  const queryOptions = getGetAnalyticsQueryOptions(params, options);
-  const query = useQuery(queryOptions) as UseQueryResult<TData, TError> & { queryKey: QueryKey };
-  return withQueryKey(query, queryOptions.queryKey);
-}
-
 

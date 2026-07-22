@@ -62,7 +62,16 @@ export default function ChartView() {
   const safeTimeframe = timeframe || "15m";
 
   const { data: chartData, isLoading, error } = useGetChart(safeSymbol, safeTimeframe, {
-    query: { refetchInterval: 30000, queryKey: ["/api/chart", safeSymbol, safeTimeframe] },
+    query: {
+      // A cache miss now starts a background chart warm-up. Poll briefly until
+      // candles arrive, then return to the normal low-frequency refresh.
+      // 2.5s keeps the cold-load poll under the API's 60/min chart rate limit.
+      refetchInterval: (query) => {
+        const data = query.state.data;
+        return !data || data.candles.length === 0 ? 2500 : 30000;
+      },
+      queryKey: ["/api/chart", safeSymbol, safeTimeframe],
+    },
   });
 
   // ── Create chart once ──────────────────────────────────────────────────────
@@ -228,9 +237,9 @@ export default function ChartView() {
         <div className="flex-1 relative bg-background">
           <div className="absolute inset-0" ref={chartContainerRef} />
           
-          {isLoading && (
+          {(isLoading || (!error && chartData?.candles.length === 0)) && (
             <div className="absolute inset-0 z-10 flex items-center justify-center text-muted-foreground text-sm font-mono bg-background/80 backdrop-blur-sm">
-              Loading chart data...
+              {isLoading ? "Loading chart data..." : "Preparing chart data..."}
             </div>
           )}
           

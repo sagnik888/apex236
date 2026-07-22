@@ -130,11 +130,14 @@ function formatSignalTime(ts: string | unknown): string {
   try {
     const d = new Date(ts);
     if (isNaN(d.getTime())) return ts; // fallback
-    const hh = String(d.getHours()).padStart(2, '0');
-    const mm = String(d.getMinutes()).padStart(2, '0');
-    const dd = String(d.getDate()).padStart(2, '0');
-    const mo = String(d.getMonth() + 1).padStart(2, '0');
-    return `${hh}:${mm}/${dd}:${mo}`;
+    // Always render in IST regardless of the viewer's browser timezone
+    // (the signal_time is a tz-aware ISO string from the backend).
+    const parts = new Intl.DateTimeFormat("en-IN", {
+      day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit",
+      hour12: false, timeZone: "Asia/Kolkata",
+    }).formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    return `${get("hour")}:${get("minute")} ${get("day")} ${get("month")}`;
   } catch (e) {
     return ts;
   }
@@ -329,7 +332,7 @@ export default function Dashboard() {
       {/* Market Breadth Widget */}
       {(stats as any)?.market_breadth && (
         <div className="flex items-center gap-2 p-2 mx-4 mt-4 bg-muted/30 border border-border rounded-lg text-sm shrink-0">
-          <div className="font-semibold px-2">NIFTY 100 Breadth:</div>
+          <div className="font-semibold px-2">Market Breadth (1d bias):</div>
           <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden flex">
             <div 
               className="h-full bg-signal-buy transition-all" 
@@ -351,7 +354,9 @@ export default function Dashboard() {
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground">
             <Activity className="h-8 w-8 animate-pulse text-primary mb-4" />
             <p className="font-mono text-sm">Initial scan in progress...</p>
-            <p className="text-xs opacity-70 mt-2">Scanning 50 Nifty symbols × 4 timeframes.</p>
+            <p className="text-xs opacity-70 mt-2">
+              Scanning {stats?.total_symbols ?? 236} Nifty symbols × 4 timeframes.
+            </p>
           </div>
         ) : signals.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground bg-card/50 rounded-lg border border-border border-dashed">
@@ -360,8 +365,27 @@ export default function Dashboard() {
             <p className="text-xs opacity-70 mt-1">Try adjusting filters or wait for next scan.</p>
           </div>
         ) : (
-          <div className="rounded-md border border-border bg-card overflow-hidden">
-            <table className="w-full text-sm text-left">
+          <div className="min-w-[121.5rem] rounded-md border border-border bg-card">
+            <table className="w-full table-fixed text-sm text-left">
+              <colgroup>
+                <col className="w-[9.625rem]" />
+                <col className="w-[5.5rem]" />
+                <col className="w-[5.5rem]" />
+                <col className="w-[6.875rem]" />
+                <col className="w-24" />
+                <col className="w-[7.875rem]" />
+                <col className="w-[6.5625rem]" />
+                <col className="w-[5.9375rem]" />
+                <col className="w-[5.9375rem]" />
+                <col className="w-[5.9375rem]" />
+                <col className="w-[9.75rem]" />
+                <col className="w-24" />
+                <col className="w-[5.625rem]" />
+                <col className="w-[5.625rem]" />
+                <col className="w-[8rem]" />
+                <col className="w-[9rem]" />
+                <col className="w-[5.5rem]" />
+              </colgroup>
               <thead className="text-xs text-muted-foreground bg-muted/50 border-b border-border sticky top-0 uppercase tracking-wider z-10">
                 <tr>
                   <Th label="Symbol" />
@@ -579,11 +603,11 @@ export default function Dashboard() {
                               {(row as any).live_pnl_abs > 0 ? "+" : ""}{(row as any).live_pnl_abs?.toFixed(2)} ({(row as any).live_pnl_pct > 0 ? "+" : ""}{(row as any).live_pnl_pct?.toFixed(2)}%)
                             </span>
                           </div>
-                        ) : row.pnl_pct != null ? (
+                        ) : row.state === "FLAT" && row.pnl_pct != null ? (
                           <span className={row.pnl_pct > 0 ? "text-signal-buy" : row.pnl_pct < 0 ? "text-signal-sell" : "text-muted-foreground"}>
                             {row.pnl_pct > 0 ? "+" : ""}{row.pnl_pct.toFixed(2)}%
                           </span>
-                        ) : <span className="text-muted-foreground">-</span>}
+                        ) : <span className="text-muted-foreground">—</span>}
                       </td>
 
                       {/* ETA */}

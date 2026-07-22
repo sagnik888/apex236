@@ -48,13 +48,25 @@ Thumbs.db
 .cache/
 .local/
 
+# Secrets — broker credentials must never be committed
+.env
+*.env
+broker_secrets.env
+angel_instruments.json
+angel_session.json
+angel_cache/
+
 # Python & Logs
 __pycache__/
 *.pyc
 *.log
 *.sqlite
 *.db
+*.db-shm
+*.db-wal
+.pnpm-store/
 response.json
 *test_chart_output.json
 artifacts/api-server/python_scanner/debug_*.py
 artifacts/api-server/python_scanner/test_*.py
+!artifacts/api-server/python_scanner/test_market_session.py

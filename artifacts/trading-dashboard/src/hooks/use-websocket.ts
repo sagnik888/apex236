@@ -174,10 +174,12 @@ export function useWebSocket() {
 
     const scheduleReconnect = () => {
       if (dead) return;
+      // Add random jitter of ±15% to avoid thundering herd
+      const jitter = reconnectDelay.current * (0.85 + Math.random() * 0.3);
       reconnectTimeout = setTimeout(() => {
         reconnectDelay.current = Math.min(reconnectDelay.current * 1.5, 30000);
         connect();
-      }, reconnectDelay.current);
+      }, jitter);
     };
 
     connect();

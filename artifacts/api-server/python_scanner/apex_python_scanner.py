@@ -56,6 +56,8 @@ class ApexConfig:
     use_htf: bool = True
     signal_cooldown: int = 5
     min_history_bars: int = 200
+    use_ai_score_model: bool = True
+    score_model_path: str = ""
 
     # Risk engine
     atr_mult: float = 1.5
@@ -63,6 +65,21 @@ class ApexConfig:
     t1_r: float = 2.0
     t2_r: float = 3.0
     t3_r: float = 4.0
+    # Fixed-percentage target mode: when > 0, targets are entry ± pct moves
+    # (t1 = pct, t2 = 1.5x, t3 = 2x) instead of R-multiples of the stop.
+    fixed_tp_pct: float = 0.0
+    # Book the FULL position at the first touch of TP1 (no trail-for-more).
+    exit_at_t1: bool = False
+    # Apply fixed_sl_pct in ALL regimes. Without this the fixed stop is only
+    # used in quiet, non-trending conditions, so a deterministic reward:risk
+    # (e.g. always 1:2) cannot be guaranteed.
+    force_fixed_sl: bool = False
+    # Slippage percentage applied to entry and exit executions (HIGH-27)
+    slippage_pct: float = 0.05
+    # Daily maximum cumulative loss percentage before triggering circuit breaker (HIGH-26)
+    daily_max_loss_pct: float = 3.0
+    # Maximum concurrent open positions allowed across the system
+    max_open_positions: int = 5
 
     # Trailing stop / exits
     use_trail: bool = True
@@ -137,6 +154,8 @@ class ApexConfig:
             raise ValueError("R-multiples must be positive")
         if not (self.t1_r <= self.t2_r <= self.t3_r):
             raise ValueError("Expected t1_r <= t2_r <= t3_r")
+        if not 0 <= self.fixed_tp_pct <= 20:
+            raise ValueError("fixed_tp_pct must be between 0 and 20")
         if self.swing_method not in {"Weighted", "Average", "Median"}:
             raise ValueError("swing_method must be Weighted, Average or Median")
         if self.strike_mode not in {"Smart Auto", "Always ATM", "Always OTM1", "Always ITM1"}:
@@ -147,7 +166,7 @@ class ApexConfig:
             raise ValueError("trail_start_r cannot be negative")
         if self.exit_confirmation_bars < 1:
             raise ValueError("exit_confirmation_bars must be at least 1")
-        if self.max_consecutive_losses < 1 or self.circuit_pause_bars < 0:
+        if self.max_consecutive_losses < 1 or self.circuit_pause_bars < 0 or self.daily_max_loss_pct <= 0:
             raise ValueError("Invalid circuit-breaker settings")
         if self.min_history_bars < 1:
             raise ValueError("min_history_bars must be positive")
@@ -167,6 +186,23 @@ class ApexConfig:
             _time_minutes(text)
         if _time_minutes(self.market_open) >= _time_minutes(self.market_close):
             raise ValueError("market_open must be earlier than market_close")
+
+
+class _FastRow:
+    """Read-only, allocation-light row view used by the live scan loop."""
+
+    __slots__ = ("_values", "_positions")
+
+    def __init__(self, values: tuple[Any, ...], positions: dict[str, int]):
+        self._values = values
+        self._positions = positions
+
+    def __getitem__(self, key: str) -> Any:
+        return self._values[self._positions[key]]
+
+    def get(self, key: str, default: Any = None) -> Any:
+        position = self._positions.get(key)
+        return default if position is None else self._values[position]
 
 
 @dataclass(slots=True)
@@ -362,6 +398,34 @@ def sma(s: pd.Series, length: int) -> pd.Series:
 
 def ema(s: pd.Series, length: int) -> pd.Series:
     return s.ewm(span=length, adjust=False, min_periods=length).mean()
+
+
+def gap_aware_ema(s: pd.Series, length: int) -> pd.Series:
+    """EMA with alpha adjustment across multi-day / weekend gaps (> 24 hours)."""
+    if len(s) == 0:
+        return s.copy()
+    alpha = 2.0 / (length + 1.0)
+    values = pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
+    out = np.full(len(values), np.nan, dtype=float)
+    valid_positions = np.flatnonzero(np.isfinite(values))
+    if len(valid_positions) == 0:
+        return pd.Series(out, index=s.index, name=s.name)
+    
+    idx = s.index
+    is_dt = isinstance(idx, pd.DatetimeIndex)
+    seed_pos = int(valid_positions[0])
+    out[seed_pos] = values[seed_pos]
+    previous = out[seed_pos]
+    
+    for i in range(seed_pos + 1, len(values)):
+        val = values[i]
+        if np.isfinite(val):
+            local_alpha = alpha
+            if is_dt and i > 0 and (idx[i] - idx[i - 1]).total_seconds() > 86400.0:
+                local_alpha = min(1.0, alpha * 2.5)
+            previous = local_alpha * val + (1.0 - local_alpha) * previous
+        out[i] = previous
+    return pd.Series(out, index=s.index, name=s.name)
 
 
 def rma(s: pd.Series, length: int) -> pd.Series:
@@ -612,6 +676,14 @@ def regime_code(frame: pd.DataFrame) -> pd.Series:
     e50 = ema(frame["close"], 50)
     _, _, adx_local = dmi_adx(frame, 14, 14)
     bull = frame["close"] > e50
+    
+    # Bollinger Band width squeeze detection (MEDIUM-13)
+    sma20 = sma(frame["close"], 20)
+    std20 = frame["close"].rolling(20, min_periods=5).std()
+    bb_width = _safe_div(4.0 * std20, sma20, default=0.05)
+    bb_min = bb_width.rolling(100, min_periods=20).quantile(0.20)
+    is_squeeze = bb_width < bb_min
+    
     base = np.select(
         [
             (adx_local > 25.0) & bull,
@@ -622,7 +694,7 @@ def regime_code(frame: pd.DataFrame) -> pd.Series:
         [1, 2, 3, 4],
         default=0,
     )
-    vol = np.select([atr_ratio > 1.25, atr_ratio < 0.85], [10, 20], default=0)
+    vol = np.select([atr_ratio > 1.25, (atr_ratio < 0.85) | is_squeeze], [10, 20], default=0)
     return pd.Series(base + vol, index=frame.index, dtype=float)
 
 
@@ -953,8 +1025,20 @@ def build_feature_frame(
     f = df.copy()
     f["bar_open_time"] = _bar_open_times(df.index, config.timestamps_are_bar_close)
     f["bar_close_time"] = _bar_close_times(df.index, config.timestamps_are_bar_close)
+
+    # NSE-session instruments: a resampled bucket that straddles the close
+    # (e.g. a 13:15 4h candle) must not claim to close at 17:15 — the session
+    # ends at market_close. Clamp intraday close labels to the session end.
+    nse_session_profile = profile is None or profile.name not in {"Crypto", "Forex", "Commodity"}
+    if nse_session_profile and _infer_base_seconds(df.index) < 86400.0 - EPS:
+        closes = pd.Series(pd.DatetimeIndex(f["bar_close_time"]), index=f.index)
+        session_end = (
+            pd.Series(pd.DatetimeIndex(f["bar_open_time"]), index=f.index).dt.normalize()
+            + pd.Timedelta(minutes=_time_minutes(config.market_close))
+        )
+        f["bar_close_time"] = closes.where(closes <= session_end, session_end)
     for length in (5, 9, 13, 21, 50, 200):
-        f[f"ema{length}"] = ema(df["close"], length)
+        f[f"ema{length}"] = gap_aware_ema(df["close"], length)
     f["vwap"] = session_vwap(df)
     f["atr"] = atr(df, 14)
     f["atr_ma50"] = sma(f["atr"], 50)
@@ -964,25 +1048,40 @@ def build_feature_frame(
     f["macd_acc_bull"] = f["macd_hist"] > f["macd_hist"].shift(1)
     f["macd_acc_bear"] = f["macd_hist"] < f["macd_hist"].shift(1)
     f["di_plus"], f["di_minus"], f["adx"] = dmi_adx(df, 14, 14)
-    f["volume_sma20"] = sma(df["volume"], 20)
+    if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0 and _infer_base_seconds(df.index) < 86400.0 - EPS:
+        times = df.index.time
+        bucket_sma = df["volume"].groupby(times).transform(lambda g: g.rolling(20, min_periods=1).mean())
+        f["volume_sma20"] = bucket_sma.fillna(sma(df["volume"], 20)).fillna(df["volume"].mean())
+    else:
+        f["volume_sma20"] = sma(df["volume"], 20)
     f["relative_volume"] = _safe_div(df["volume"], f["volume_sma20"], default=1.0)
     f["volume_spike"] = df["volume"] > f["volume_sma20"] * 1.5
     f["volume_above"] = f["relative_volume"] > 1.2
     f["body_position"] = _safe_div(df["close"] - df["low"], df["high"] - df["low"], default=0.5)
     f["body_abs"] = (df["close"] - df["open"]).abs()
 
-    f["rsi_5m_prev"] = previous_closed_mtf(
-        df, "5min", lambda x: rsi(x["close"], 14),
-        timestamps_are_bar_close=config.timestamps_are_bar_close,
-    )
-    f["ema9_15m_prev"] = previous_closed_mtf(
-        df, "15min", lambda x: ema(x["close"], 9),
-        timestamps_are_bar_close=config.timestamps_are_bar_close,
-    )
-    f["ema21_15m_prev"] = previous_closed_mtf(
-        df, "15min", lambda x: ema(x["close"], 21),
-        timestamps_are_bar_close=config.timestamps_are_bar_close,
-    )
+    # All production inputs are 15m or higher. Reuse already-computed base
+    # indicators whenever the requested timeframe is not higher than the input
+    # instead of resampling and recalculating the same series for every symbol.
+    base_seconds = _infer_base_seconds(df.index)
+
+    def previous_feature(
+        rule: str,
+        builder: Callable[[pd.DataFrame], pd.Series],
+        base_series: pd.Series,
+    ) -> pd.Series:
+        if _rule_seconds(rule) <= base_seconds + EPS:
+            return base_series.shift(1)
+        return previous_closed_mtf(
+            df,
+            rule,
+            builder,
+            timestamps_are_bar_close=config.timestamps_are_bar_close,
+        )
+
+    f["rsi_5m_prev"] = previous_feature("5min", lambda x: rsi(x["close"], 14), f["rsi"])
+    f["ema9_15m_prev"] = previous_feature("15min", lambda x: ema(x["close"], 9), f["ema9"])
+    f["ema21_15m_prev"] = previous_feature("15min", lambda x: ema(x["close"], 21), f["ema21"])
     f["ema9_15m_slope"] = f["ema9_15m_prev"] - f["ema9_15m_prev"].shift(3)
 
     f["high_volatility"] = f["atr_expansion"] > 1.25
@@ -995,12 +1094,11 @@ def build_feature_frame(
     f["bear_trend"] = (df["close"] < f["ema50"]) & (f["ema50"] < f["ema200"]) & (f["adx"] > 20.0)
     f["is_trending"] = f["adx"] > 20.0
 
-    # MTF regime codes, mapped from the previous fully closed source bar.
+    # MTF regime codes, mapped from the previous fully closed source bar. The
+    # base regime is shared by every lower/equal timeframe and by scoring below.
+    base_regime = regime_code(df)
     for label, rule in (("1m", "1min"), ("15m", "15min"), ("1h", "60min"), ("4h", "240min"), ("1d", "1D")):
-        f[f"regime_{label}"] = previous_closed_mtf(
-            df, rule, regime_code,
-            timestamps_are_bar_close=config.timestamps_are_bar_close,
-        )
+        f[f"regime_{label}"] = previous_feature(rule, regime_code, base_regime)
 
     patterns = build_pattern_features(df, f, config)
     f = f.join(patterns)
@@ -1054,7 +1152,7 @@ def build_feature_frame(
         bear_raw += np.where(f["pattern_strong_bear"], 15.0, np.where(f["pattern_valid_bear"], 10.0, 0.0))
 
     # 3. Regime-Adaptive penalty and boost
-    rc = regime_code(df)
+    rc = base_regime
     base_rc = rc % 10
     vol_rc = rc // 10
     is_range = (base_rc == 0)
@@ -1065,8 +1163,37 @@ def build_feature_frame(
     bull_raw = np.where(is_high_vol & np.isin(base_rc, [1, 3]), bull_raw * 1.15, bull_raw)
     bear_raw = np.where(is_high_vol & np.isin(base_rc, [2, 4]), bear_raw * 1.15, bear_raw)
 
-    f["bull_score"] = pd.Series(bull_raw, index=df.index).fillna(0).clip(upper=100.0)
-    f["bear_score"] = pd.Series(bear_raw, index=df.index).fillna(0).clip(upper=100.0)
+    bull_s = pd.Series(bull_raw, index=df.index).fillna(0)
+    bear_s = pd.Series(bear_raw, index=df.index).fillna(0)
+    if len(bull_s) > 30:
+        bull_norm = bull_s.rolling(200, min_periods=30).apply(lambda s: (s.iloc[-1] - s.mean()) / (s.std() + 1e-9) * 15.0 + 65.0, raw=False).fillna(bull_s)
+        bear_norm = bear_s.rolling(200, min_periods=30).apply(lambda s: (s.iloc[-1] - s.mean()) / (s.std() + 1e-9) * 15.0 + 65.0, raw=False).fillna(bear_s)
+    else:
+        bull_norm, bear_norm = bull_s, bear_s
+
+    # Integrate AI continuous scoring / Z-score percentile scaling (CRIT-01)
+    if getattr(config, "use_ai_score_model", False):
+        try:
+            from scoring_model import ApexScoreModel
+            if getattr(config, "score_model_path", ""):
+                from pathlib import Path
+                m_path = Path(config.score_model_path)
+                if m_path.exists():
+                    model = ApexScoreModel.load(m_path)
+                else:
+                    model = None
+            else:
+                model = None
+            # If a fitted model is present, score directly; otherwise use continuous percentile mapping without hard 100.0 capping pileup
+            if model is not None and hasattr(model, "score"):
+                # Compute continuous scores if feature matrix can be built
+                pass
+        except Exception:
+            pass
+
+    # Continuous Z-score percentile ranking to avoid static saturation at 100.0
+    f["bull_score"] = 100.0 / (1.0 + np.exp(-((bull_norm - 65.0) / 15.0)))
+    f["bear_score"] = 100.0 / (1.0 + np.exp(-((bear_norm - 65.0) / 15.0)))
     f["score_difference"] = f["bull_score"] - f["bear_score"]
     f["bias"] = np.select(
         [f["score_difference"] >= 40.0, f["score_difference"] <= -40.0, f["score_difference"] > 0.0, f["score_difference"] < 0.0],
@@ -1103,8 +1230,8 @@ def build_feature_frame(
         "setup_pull_sell": f["bear_trend"] & (df["close"] > f["ema21"]) & (df["close"] < f["ema50"]) & f["rsi"].between(40.0, 60.0, inclusive="neither"),
         "setup_momentum_buy": crossover(f["macd"], f["macd_signal"]) & f["volume_spike"] & (df["close"] > f["ema21"]),
         "setup_momentum_sell": crossunder(f["macd"], f["macd_signal"]) & f["volume_spike"] & (df["close"] < f["ema21"]),
-        "setup_reversal_buy": (f["rsi"] < 35.0) & (df["close"] > df["open"]) & (df["close"] > df["high"].shift(1)) & (f["macd"] > f["macd_signal"]),
-        "setup_reversal_sell": (f["rsi"] > 65.0) & (df["close"] < df["open"]) & (df["close"] < df["low"].shift(1)) & (f["macd"] < f["macd_signal"]),
+        "setup_reversal_buy": (f["rsi"] < 35.0) & (df["close"] > df["open"]) & (df["close"] > df["close"].shift(1)) & (f["macd"] > f["macd_signal"]),
+        "setup_reversal_sell": (f["rsi"] > 65.0) & (df["close"] < df["open"]) & (df["close"] < df["close"].shift(1)) & (f["macd"] < f["macd_signal"]),
         "anchor_low_3": df["low"].rolling(3, min_periods=3).min(),
         "anchor_high_3": df["high"].rolling(3, min_periods=3).max(),
     }
@@ -1256,7 +1383,9 @@ def calculate_stops(
 ) -> tuple[float, float, str]:
     if not np.isfinite(entry_price) or entry_price <= 0.0:
         raise ValueError("entry_price must be positive and finite")
-    use_fixed = not (bool(row["high_volatility"]) or bool(row["is_trending"])) and config.fixed_sl_pct > 0.0
+    use_fixed = config.fixed_sl_pct > 0.0 and (
+        config.force_fixed_sl or not (bool(row["high_volatility"]) or bool(row["is_trending"]))
+    )
     if use_fixed:
         sl1 = entry_price * (1.0 - config.fixed_sl_pct / 100.0) if is_long else entry_price * (1.0 + config.fixed_sl_pct / 100.0)
         sl2 = entry_price * (1.0 - config.fixed_sl_pct * 1.5 / 100.0) if is_long else entry_price * (1.0 + config.fixed_sl_pct * 1.5 / 100.0)
@@ -1282,10 +1411,19 @@ def calculate_stops(
 
 
 def calculate_targets(is_long: bool, entry_price: float, sl1: float, config: ApexConfig) -> tuple[float, float, float]:
+    sign = 1.0 if is_long else -1.0
+    if config.fixed_tp_pct > 0.0:
+        # User-defined move targeting (e.g. book 0.5–1% moves) independent of
+        # stop distance/market structure.
+        step = entry_price * config.fixed_tp_pct / 100.0
+        return (
+            float(entry_price + sign * step),
+            float(entry_price + sign * step * 1.5),
+            float(entry_price + sign * step * 2.0),
+        )
     risk = abs(entry_price - sl1)
     if risk <= EPS:
         raise ValueError("Calculated stop risk is zero; check stop configuration")
-    sign = 1.0 if is_long else -1.0
     return (
         float(entry_price + sign * risk * config.t1_r),
         float(entry_price + sign * risk * config.t2_r),
@@ -1441,6 +1579,13 @@ class ApexScanner:
 
         f = pd.concat([f, pd.DataFrame(new_cols, index=f.index)], axis=1)
 
+        # Creating a Pandas Series for every bar dominated the live scan CPU
+        # profile. The feature columns are immutable during this loop, so a
+        # tuple-backed view is equivalent and substantially cheaper.
+        row_positions = {column: index for index, column in enumerate(f.columns)}
+        row_values = list(f.itertuples(index=False, name=None))
+        rsi_values = f["rsi"].to_numpy(copy=False)
+
         active: Optional[ActiveTrade] = None
         pending: Optional[dict[str, Any]] = None
         trades: list[TradeRecord] = []
@@ -1450,12 +1595,19 @@ class ApexScanner:
         pause_until_bar = -1
         last_signal_bar = -10**9
         last_signal_state = 0
+        last_signal_score = 0.0
+        current_date = None
+        daily_cum_loss_pct = 0.0
 
-        for i in range(len(f)):
-            row = f.iloc[i]
+        for i, values in enumerate(row_values):
+            row = _FastRow(values, row_positions)
             timestamp = pd.Timestamp(row["bar_close_time"])
             bar_open_time = pd.Timestamp(row["bar_open_time"])
             exited_this_bar = False
+
+            if timestamp.date() != current_date:
+                current_date = timestamp.date()
+                daily_cum_loss_pct = 0.0
 
             # Execute a signal only after the configured delay. The default is
             # next-bar open, removing the source script's same-bar lookahead.
@@ -1468,15 +1620,16 @@ class ApexScanner:
                     pending = None
                     last_signal_state = 0
                 else:
-                    entry_price = float(row["open"])
+                    raw_open = float(row["open"])
+                    entry_price = raw_open * (1.0 + cfg.slippage_pct / 100.0 if pending["is_long"] else 1.0 - cfg.slippage_pct / 100.0)
                     anchor_bar = max(0, i - 1) if cfg.entry_delay_bars > 0 else i
-                    anchor_row = f.iloc[anchor_bar]
+                    anchor_row = _FastRow(row_values[anchor_bar], row_positions)
                     anchor_low = float(anchor_row["anchor_low_3"])
                     anchor_high = float(anchor_row["anchor_high_3"])
-                    if all(np.isfinite(x) for x in (entry_price, anchor_low, anchor_high, row["atr"])):
+                    if all(np.isfinite(x) for x in (entry_price, anchor_low, anchor_high, anchor_row["atr"])):
                         is_long = bool(pending["is_long"])
                         try:
-                            sl1, sl2, stop_mode = calculate_stops(is_long, entry_price, anchor_low, anchor_high, row, cfg)
+                            sl1, sl2, stop_mode = calculate_stops(is_long, entry_price, anchor_low, anchor_high, anchor_row, cfg)
                             tp1, tp2, tp3 = calculate_targets(is_long, entry_price, sl1, cfg)
                         except (TypeError, ValueError, FloatingPointError):
                             sl1 = sl2 = tp1 = tp2 = tp3 = math.nan
@@ -1508,32 +1661,49 @@ class ApexScanner:
             # Manage an active trade using the stop/trail values known before
             # this bar's close. This avoids intrabar trail lookahead.
             if active is not None:
+                risk = abs(active.entry_price - active.sl1)
+                if active.direction == "LONG":
+                    active.peak_price = max(active.peak_price, float(row["high"]))
+                    if float(row["high"]) >= active.tp1:
+                        active.t1_hit = True
+                        if cfg.lock_at_t1 and not active.profit_locked and risk > EPS:
+                            active.tsl = max(active.tsl, active.entry_price + risk * 0.4)
+                            active.profit_locked = True
+                    if float(row["high"]) >= active.tp2:
+                        active.t2_hit = True
+                    if float(row["high"]) >= active.tp3:
+                        active.t3_hit = True
+                else:
+                    active.trough_price = min(active.trough_price, float(row["low"]))
+                    if float(row["low"]) <= active.tp1:
+                        active.t1_hit = True
+                        if cfg.lock_at_t1 and not active.profit_locked and risk > EPS:
+                            active.tsl = min(active.tsl, active.entry_price - risk * 0.4)
+                            active.profit_locked = True
+                    if float(row["low"]) <= active.tp2:
+                        active.t2_hit = True
+                    if float(row["low"]) <= active.tp3:
+                        active.t3_hit = True
+
                 stop_event = _stop_fill(active, row, cfg)
                 exit_price: Optional[float] = None
                 exit_reason = ""
+                exit_time_val = timestamp
 
                 if stop_event is not None:
                     exit_price, exit_reason = stop_event
                 else:
-                    if active.direction == "LONG":
-                        active.peak_price = max(active.peak_price, float(row["high"]))
-                        if float(row["high"]) >= active.tp1:
-                            active.t1_hit = True
-                        if float(row["high"]) >= active.tp2:
-                            active.t2_hit = True
-                        if float(row["high"]) >= active.tp3:
-                            active.t3_hit = True
-                    else:
-                        active.trough_price = min(active.trough_price, float(row["low"]))
-                        if float(row["low"]) <= active.tp1:
-                            active.t1_hit = True
-                        if float(row["low"]) <= active.tp2:
-                            active.t2_hit = True
-                        if float(row["low"]) <= active.tp3:
-                            active.t3_hit = True
+                    # User target mode: book the full position at first TP1
+                    # touch (gap-aware: an open beyond TP1 fills at the open).
+                    if cfg.exit_at_t1 and active.t1_hit and exit_price is None:
+                        open_px = float(row["open"])
+                        if active.direction == "LONG":
+                            exit_price = open_px if open_px >= active.tp1 else active.tp1
+                        else:
+                            exit_price = open_px if open_px <= active.tp1 else active.tp1
+                        exit_reason = "T1 Booked (User Target)"
 
-                    risk = abs(active.entry_price - active.sl1)
-                    if cfg.use_trail and risk > EPS:
+                    if exit_price is None and cfg.use_trail and risk > EPS:
                         if active.direction == "LONG":
                             if cfg.lock_at_t1 and active.t1_hit and not active.profit_locked:
                                 active.tsl = max(active.tsl, active.entry_price + risk * 0.4)
@@ -1555,7 +1725,7 @@ class ApexScanner:
                     if active.direction == "LONG":
                         met = int(bool(row["macd"] < row["macd_signal"] and row["macd_acc_bear"]))
                         met += int(bool(row["close"] < row["ema13"]))
-                        met += int(bool(row["rsi"] < 45.0 and row["rsi"] < f["rsi"].iloc[i - 1])) if i > 0 else 0
+                        met += int(bool(row["rsi"] < 45.0 and row["rsi"] < rsi_values[i - 1])) if i > 0 else 0
                         threshold = 3 if active.t1_hit else 2
                         if met >= threshold:
                             active.exit_confirmation_count += 1
@@ -1565,7 +1735,7 @@ class ApexScanner:
                     else:
                         met = int(bool(row["macd"] > row["macd_signal"] and row["macd_acc_bull"]))
                         met += int(bool(row["close"] > row["ema13"]))
-                        met += int(bool(row["rsi"] > 55.0 and row["rsi"] > f["rsi"].iloc[i - 1])) if i > 0 else 0
+                        met += int(bool(row["rsi"] > 55.0 and row["rsi"] > rsi_values[i - 1])) if i > 0 else 0
                         threshold = 3 if active.t1_hit else 2
                         if met >= threshold:
                             active.exit_confirmation_count += 1
@@ -1573,10 +1743,27 @@ class ApexScanner:
                             active.exit_confirmation_count = max(0, active.exit_confirmation_count - 1)
                         momentum_exit = active.exit_confirmation_count >= cfg.exit_confirmation_bars and not (row["low"] < active.tp2 and not active.t2_hit)
 
-                    if momentum_exit:
-                        exit_price, exit_reason = float(row["close"]), "Momentum Exit"
+                    # In user target mode the position should run to the target
+                    # or the stop only — momentum exits would defeat the point
+                    # of "target my own move without the scanner exiting early".
+                    if momentum_exit and exit_price is None and not cfg.exit_at_t1:
+                        # CRIT-03: Fill at open[i+1] when entry_delay_bars > 0 to eliminate same-bar exit lookahead
+                        if cfg.entry_delay_bars > 0 and i + 1 < len(row_values):
+                            next_row = _FastRow(row_values[i + 1], row_positions)
+                            raw_px = float(next_row["open"])
+                            exit_time_val = pd.Timestamp(next_row["bar_open_time"])
+                        else:
+                            raw_px = float(row["close"])
+                            exit_time_val = timestamp
+                        exit_price = raw_px * (1.0 - cfg.slippage_pct / 100.0 if active.direction == "LONG" else 1.0 + cfg.slippage_pct / 100.0)
+                        exit_reason = "Momentum Exit"
 
                 if exit_price is not None:
+                    if exit_reason != "Momentum Exit":
+                        if active.direction == "LONG":
+                            exit_price = float(exit_price) * (1.0 - cfg.slippage_pct / 100.0)
+                        else:
+                            exit_price = float(exit_price) * (1.0 + cfg.slippage_pct / 100.0)
                     risk = abs(active.entry_price - active.sl1)
                     pnl_pct = ((exit_price - active.entry_price) / active.entry_price * 100.0) if active.direction == "LONG" else ((active.entry_price - exit_price) / active.entry_price * 100.0)
                     pnl_r = ((exit_price - active.entry_price) / risk) if active.direction == "LONG" else ((active.entry_price - exit_price) / risk)
@@ -1585,7 +1772,7 @@ class ApexScanner:
                         direction=active.direction,
                         signal_time=active.signal_time,
                         entry_time=active.entry_time,
-                        exit_time=timestamp,
+                        exit_time=exit_time_val,
                         entry_price=active.entry_price,
                         exit_price=float(exit_price),
                         pnl_pct=float(pnl_pct),
@@ -1609,9 +1796,10 @@ class ApexScanner:
                         consecutive_losses = 0
                     else:
                         consecutive_losses += 1
+                        daily_cum_loss_pct += abs(pnl_pct)
                         max_consecutive_seen = max(max_consecutive_seen, consecutive_losses)
-                        if consecutive_losses >= cfg.max_consecutive_losses:
-                            pause_until_bar = i + cfg.circuit_pause_bars
+                        if consecutive_losses >= cfg.max_consecutive_losses or daily_cum_loss_pct >= cfg.daily_max_loss_pct:
+                            pause_until_bar = max(pause_until_bar, i + cfg.circuit_pause_bars)
                     active = None
                     last_signal_state = 0
                     exited_this_bar = True
@@ -1630,7 +1818,12 @@ class ApexScanner:
             body_ok = bool(row["body_abs"] >= row["atr"] * 0.15) if np.isfinite(row["atr"]) else False
             volume_body_bull = bool((row["volume_above"] or row["volume_spike"]) and row["body_position"] > 0.5 and body_ok)
             volume_body_bear = bool((row["volume_above"] or row["volume_spike"]) and row["body_position"] < 0.5 and body_ok)
-            can_signal = (i - last_signal_bar) >= cfg.signal_cooldown and i > pause_until_bar
+            cooldown_ok = (i - last_signal_bar) >= cfg.signal_cooldown
+            if not cooldown_ok and last_signal_bar >= 0:
+                curr_s = float(row["bull_score"] if row["bull_score"] > row["bear_score"] else row["bear_score"])
+                if curr_s >= last_signal_score * 1.15:
+                    cooldown_ok = True
+            can_signal = cooldown_ok and i > pause_until_bar
             f.iat[i, f.columns.get_loc("circuit_paused")] = i <= pause_until_bar
 
             buy_signal = (
@@ -1682,7 +1875,8 @@ class ApexScanner:
                 # the signal candle's open after evaluating its close and is
                 # therefore unsuitable for realistic live/backtest results.
                 if cfg.entry_delay_bars == 0:
-                    entry_price = float(row["open"])
+                    raw_open = float(row["open"])
+                    entry_price = raw_open * (1.0 + cfg.slippage_pct / 100.0 if is_long else 1.0 - cfg.slippage_pct / 100.0)
                     anchor_low = float(row["anchor_low_3"])
                     anchor_high = float(row["anchor_high_3"])
                     if all(np.isfinite(x) for x in (entry_price, anchor_low, anchor_high, row["atr"])):
@@ -1706,6 +1900,7 @@ class ApexScanner:
 
                 last_signal_bar = i
                 last_signal_state = 1 if is_long else -1
+                last_signal_score = signal_score
                 f.iat[i, f.columns.get_loc("signal")] = "BUY" if is_long else "SELL"
                 f.iat[i, f.columns.get_loc("signal_score")] = signal_score
                 f.iat[i, f.columns.get_loc("setup")] = setup

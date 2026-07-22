@@ -7,10 +7,20 @@
  */
 
 export * from './activeTrade';
+export * from './analyticsEquityPoint';
+export * from './analyticsMetricBreakdown';
+export * from './analyticsPeriodBreakdown';
+export * from './analyticsResponse';
+export * from './analyticsResponsePeriodBreakdown';
+export * from './analyticsResponseStrategyBreakdown';
+export * from './analyticsResponseTimeframeBreakdown';
+export * from './analyticsSectorPerformance';
+export * from './analyticsSummary';
 export * from './candle';
 export * from './chartActiveTrade';
 export * from './chartResponse';
 export * from './chartSignalMarker';
+export * from './getAnalyticsParams';
 export * from './getLeaderboardParams';
 export * from './getSignalsParams';
 export * from './healthStatus';
