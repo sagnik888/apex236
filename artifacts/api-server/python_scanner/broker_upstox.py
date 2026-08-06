@@ -22,7 +22,7 @@ import os
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -86,6 +86,34 @@ def credentials_available() -> bool:
         return False
 
 
+def session_available() -> bool:
+    """True when a usable Upstox ACCESS TOKEN exists locally. No network call.
+
+    credentials_available() only proves upstox_secrets.env parses and carries an
+    API key — it is satisfied by a file that has never been through OAuth. That
+    made the dispatcher report a healthy 50/50 dual-broker split while Upstox
+    could not make a single authenticated call, and made split_symbols hand 118
+    symbols to a broker guaranteed to fail on every one of them.
+
+    Unlike Angel (which holds a TOTP secret and can re-mint its own session),
+    Upstox uses OAuth: the token expires daily at ~03:30 IST and can only be
+    renewed by a human completing the browser authorization flow.
+    """
+    try:
+        env = load_credentials()
+    except UpstoxCredentialsMissing:
+        return False
+    if env.get("UPSTOX_ACCESS_TOKEN"):
+        return True
+    if SESSION_CACHE.exists():
+        try:
+            saved = json.loads(SESSION_CACHE.read_text(encoding="utf-8"))
+            return bool(saved.get("access_token")) and UpstoxClient._session_is_valid(saved)
+        except Exception:
+            return False
+    return False
+
+
 class _RateGate:
     """Thread-safe rate gate without holding lock during sleep (`HIGH-20` pattern)."""
 
@@ -105,6 +133,35 @@ class _RateGate:
                 delay = 0.0
         if delay > 0:
             time.sleep(delay)
+
+
+def _parse_expiry(value) -> Optional[date]:
+    """Parse an Upstox `expiry` field to a date.
+
+    The real instrument master stores expiry as epoch MILLISECONDS
+    (e.g. 1793125799000), not "YYYY-MM-DD". The previous code only tried
+    strptime("%Y-%m-%d"), so every contract raised, was swallowed by a bare
+    `except: continue`, and the candidate list came out empty — meaning
+    resolve_option_contract returned None even once the strike matched.
+    Both shapes are accepted here so a schema change cannot silently disarm it.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, (int, float)) or str(value).isdigit():
+        raw = float(value)
+        # Heuristic: anything past ~year 2286 in seconds must be milliseconds.
+        if raw > 1e11:
+            raw /= 1000.0
+        try:
+            return datetime.fromtimestamp(raw, IST_TZ).date()
+        except (OverflowError, OSError, ValueError):
+            return None
+    for fmt in ("%Y-%m-%d", "%d-%m-%Y", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(str(value), fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 class UpstoxClient:
@@ -184,8 +241,17 @@ class UpstoxClient:
                 "access_token": self._access_token,
                 "saved_at": datetime.now(IST_TZ).isoformat(),
             }
-            SESSION_CACHE.write_text(json.dumps(data), encoding="utf-8")
+            import tempfile
+            import os
+            fd, tmp_path = tempfile.mkstemp(dir=SESSION_CACHE.parent, prefix="upstox_session_tmp_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, SESSION_CACHE)
         except Exception as exc:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             logger.debug("Failed to save upstox session: %s", exc)
 
     # ── Instrument Master Resolution ──────────────────────────────────────────
@@ -199,59 +265,93 @@ class UpstoxClient:
             if self._instrument_map is not None and self._fo_index is not None:
                 return self._instrument_map, self._fo_index
 
-        eq_map: dict[str, dict] = {}
-        fo_index: dict[str, list[dict]] = {}
-        raw_list: list[dict] = []
+            eq_map: dict[str, dict] = {}
+            fo_index: dict[str, list[dict]] = {}
+            raw_list: list[dict] = []
 
-        if INSTRUMENTS_CACHE.exists() and (time.time() - INSTRUMENTS_CACHE.stat().st_mtime < 86400):
-            try:
-                raw_list = json.loads(INSTRUMENTS_CACHE.read_text(encoding="utf-8"))
-            except Exception:
-                raw_list = []
-
-        if not raw_list:
-            try:
-                logger.info("Downloading complete Upstox instrument master (gzip)…")
-                r = self._http.get(INSTRUMENTS_GZ_URL, timeout=120)
-                r.raise_for_status()
-                with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz:
-                    raw_list = json.load(gz)
+            if INSTRUMENTS_CACHE.exists() and (time.time() - INSTRUMENTS_CACHE.stat().st_mtime < 86400):
                 try:
-                    INSTRUMENTS_CACHE.write_text(json.dumps(raw_list), encoding="utf-8")
+                    raw_list = json.loads(INSTRUMENTS_CACHE.read_text(encoding="utf-8"))
                 except Exception:
-                    pass
-            except Exception as exc:
-                logger.error("Failed to download Upstox instrument master: %s", exc)
-                return {}, {}
+                    raw_list = []
 
-        for item in raw_list:
-            exch = str(item.get("exchange", "")).upper()
-            inst_key = str(item.get("instrument_key", ""))
-            tsym = str(item.get("tradingsymbol", ""))
-            name = str(item.get("name", ""))
-            inst_type = str(item.get("instrument_type", "")).upper()
+            if not raw_list:
+                try:
+                    logger.info("Downloading complete Upstox instrument master (gzip)…")
+                    r = self._http.get(INSTRUMENTS_GZ_URL, timeout=120)
+                    r.raise_for_status()
+                    with gzip.GzipFile(fileobj=io.BytesIO(r.content)) as gz:
+                        raw_list = json.load(gz)
+                    try:
+                        import tempfile
+                        fd, tmp_path = tempfile.mkstemp(dir=INSTRUMENTS_CACHE.parent, prefix="upstox_instruments_tmp_")
+                        with os.fdopen(fd, "w", encoding="utf-8") as f:
+                            json.dump(raw_list, f)
+                        os.replace(tmp_path, INSTRUMENTS_CACHE)
+                    except Exception:
+                        try:
+                            os.unlink(tmp_path)
+                        except Exception:
+                            pass
+                        pass
+                except Exception as exc:
+                    logger.error("Failed to download Upstox instrument master: %s", exc)
+                    return {}, {}
 
-            if exch in ("NSE_EQ", "NSE_INDEX"):
-                if exch == "NSE_INDEX":
-                    if "NIFTY 50" in name.upper() or tsym == "NIFTY":
+            # Field names below match Upstox's real complete.json.gz. The
+            # previous parser read `exchange` expecting "NSE_EQ"/"NSE_FO" (the
+            # file carries exchange="NSE" with the venue in `segment`),
+            # `instrument_type` expecting "OPTSTK"/"OPTIDX" (the file carries
+            # "CE"/"PE"), and `tradingsymbol`/`strike` (the file carries
+            # `trading_symbol`/`strike_price`). Every lookup therefore missed,
+            # eq_map and fo_index were ALWAYS empty, every Upstox equity fetch
+            # failed, _upstox_failures passed its cutoff, and split_symbols
+            # silently routed all 236 symbols to Angel — so the advertised
+            # 50/50 dual-broker load was a single-broker load, and every option
+            # resolution returned None.
+            for item in raw_list:
+                segment = str(item.get("segment", "")).upper()
+                tsym = str(item.get("trading_symbol", "")).upper()
+                name = str(item.get("name", ""))
+                inst_type = str(item.get("instrument_type", "")).upper()
+
+                if segment == "NSE_INDEX":
+                    # Exact names only. `"NIFTY 50" in name` is a substring test
+                    # that also matches "Nifty 500", which resolved ^NSEI to the
+                    # wrong index entirely.
+                    upper_name = name.upper().strip()
+                    if upper_name == "NIFTY 50" or tsym == "NIFTY":
                         eq_map["^NSEI"] = item
                         eq_map["NIFTY 50.NS"] = item
-                    elif "BANKNIFTY" in tsym or "NIFTY BANK" in name.upper():
+                    elif upper_name == "NIFTY BANK" or tsym == "BANKNIFTY":
                         eq_map["^NSEBANK"] = item
                         eq_map["BANKNIFTY.NS"] = item
-                else:
+                elif segment == "NSE_EQ" and inst_type == "EQ":
                     eq_map[f"{tsym}.NS"] = item
                     eq_map[tsym] = item
-            elif exch == "NSE_FO" and inst_type in ("OPTIDX", "OPTSTK", "FUTIDX", "FUTSTK"):
-                underlying = name if name else tsym.split("-")[0]
-                underlying = underlying.upper().replace(" ", "")
-                fo_index.setdefault(underlying, []).append(item)
+                elif segment == "NSE_FO" and inst_type in ("CE", "PE", "FUT"):
+                    # `underlying_symbol` / `asset_symbol` give the real
+                    # underlying directly, so the option class no longer has to
+                    # be guessed from a trading-symbol prefix.
+                    underlying = (
+                        str(item.get("underlying_symbol") or item.get("asset_symbol") or name or tsym.split(" ")[0])
+                        .upper().replace(" ", "")
+                    )
+                    fo_index.setdefault(underlying, []).append(item)
 
-        with self._token_lock:
+            if not eq_map or not fo_index:
+                # Fail loudly. Silently empty maps are what let a broken parser
+                # masquerade as a healthy dual-broker setup for weeks.
+                logger.error(
+                    "Upstox instrument master parsed to %d equities and %d option classes from %d records "
+                    "— the master schema has probably changed; Upstox routing is disabled.",
+                    len(eq_map), len(fo_index), len(raw_list),
+                )
+
             self._instrument_map = eq_map
             self._fo_index = fo_index
-        logger.info("Upstox instrument master ready: %s equities/indices, %s underlying option classes", len(eq_map), len(fo_index))
-        return eq_map, fo_index
+            logger.info("Upstox instrument master ready: %s equities/indices, %s underlying option classes", len(eq_map), len(fo_index))
+            return eq_map, fo_index
 
     def resolve_symbol(self, symbol: str) -> Optional[dict]:
         """Resolve a Yahoo symbol (`RELIANCE.NS`, `^NSEI`) to Upstox instrument metadata."""
@@ -264,19 +364,22 @@ class UpstoxClient:
         option_type: str,  # "CE" or "PE"
         strike_price: float,
         expiry_date: Optional[str] = None,  # "YYYY-MM-DD" or None for nearest expiry
+        min_days_to_expiry: int = 0,  # prefer the nearest expiry at least this far out
     ) -> Optional[dict]:
         """Lookup an active option contract (`NSE_FO`) by strike and type for the given underlying."""
         _, fo_index = self.instrument_map()
-        base = underlying_symbol.replace(".NS", "").replace("^NSEI", "NIFTY").replace("^NSEBANK", "BANKNIFTY").upper()
+        base = underlying_symbol.replace(".NS", "").replace("^NSEI", "NIFTY").replace("^NSEBANK", "BANKNIFTY").replace("NIFTY 50", "NIFTY").upper()
         contracts = fo_index.get(base, [])
         if not contracts:
             return None
 
+        # In the real master the option type IS instrument_type ("CE"/"PE");
+        # there is no separate `option_type` field, and the strike lives in
+        # `strike_price`. Reading the old names matched nothing.
         matches = [
             c for c in contracts
-            if c.get("instrument_type") in ("OPTIDX", "OPTSTK")
-            and str(c.get("option_type", "")).upper() == option_type.upper()
-            and abs(float(c.get("strike", 0.0)) - strike_price) < 0.1
+            if str(c.get("instrument_type", "")).upper() == option_type.upper()
+            and abs(float(c.get("strike_price", 0.0) or 0.0) - strike_price) < 0.1
         ]
         if not matches:
             return None
@@ -284,12 +387,9 @@ class UpstoxClient:
         now_date = datetime.now(IST_TZ).date()
         valid = []
         for c in matches:
-            try:
-                exp_dt = datetime.strptime(str(c.get("expiry", "")), "%Y-%m-%d").date()
-                if exp_dt >= now_date:
-                    valid.append((exp_dt, c))
-            except Exception:
-                continue
+            exp_dt = _parse_expiry(c.get("expiry"))
+            if exp_dt is not None and exp_dt >= now_date:
+                valid.append((exp_dt, c))
 
         valid.sort(key=lambda x: x[0])
         if not valid:
@@ -299,6 +399,13 @@ class UpstoxClient:
             for exp_dt, c in valid:
                 if exp_dt.strftime("%Y-%m-%d") == expiry_date:
                     return c
+        # Prefer the nearest expiry at least `min_days_to_expiry` out so that
+        # multi-day holds are not put on the highest-theta soon-to-expire ATM.
+        if min_days_to_expiry > 0:
+            for exp_dt, c in valid:
+                if (exp_dt - now_date).days >= min_days_to_expiry:
+                    return c
+            return valid[-1][1]  # none far enough — take the farthest available
         return valid[0][1]
 
     # ── Market Data & Historical Candles ──────────────────────────────────────
@@ -446,26 +553,91 @@ class UpstoxClient:
         take_profit: float,
         tag: str = "",
     ) -> dict[str, Any]:
-        """Place an Intraday bracket order or simulated bracket order via Upstox."""
+        """Place an Intraday bracket on Upstox as three legs: a marketable ENTRY,
+        a protective SL-M STOP, and a target LIMIT.
+
+        Upstox API v2 has no native bracket/OCO product, so the previous
+        implementation silently dropped the stop and target and left every live
+        position naked. This version transmits real protective legs and refuses
+        to report success unless the STOP was accepted. The two exit legs are
+        not exchange-OCO: a monitor must cancel the sibling when one fills
+        (``requires_oco_monitor`` is returned True to signal this).
+        """
         idempotency_key = tag or f"UPSTOX-ROBO-{uuid.uuid4().hex[:8]}"
+        exit_txn = "SELL" if transaction_type.upper() == "BUY" else "BUY"
         if not is_live_execution():
-            logger.info("[PAPER MODE] Upstox place_bracket_order %s %s qty=%s entry=%s SL=%s TP=%s", transaction_type, symbol, quantity, entry_price, stop_loss, take_profit)
+            logger.info("[PAPER MODE] Upstox bracket %s %s qty=%s entry=%s SL=%s TP=%s", transaction_type, symbol, quantity, entry_price, stop_loss, take_profit)
             return {
                 "status": True,
                 "message": "Paper Upstox bracket order placed successfully",
                 "data": {"order_id": f"PAPER-ROBO-UPSTOX-{uuid.uuid4().hex[:10]}", "tag": idempotency_key},
+                "legs": {"entry": "PAPER", "stop": "PAPER" if stop_loss > 0 else None, "target": "PAPER" if take_profit > 0 else None},
+                "requires_oco_monitor": True,
                 "mode": "PAPER",
             }
 
-        return self.place_order(
-            symbol=symbol,
-            transaction_type=transaction_type,
-            quantity=quantity,
-            order_type="LIMIT" if entry_price > 0 else "MARKET",
-            price=entry_price,
-            product="I",
-            tag=idempotency_key,
+        # 1) Marketable entry — a LIMIT pinned at the last price only fills when
+        #    price trades back to it (winners run away, losers fill), so use MARKET.
+        entry_res = self.place_order(
+            symbol=symbol, transaction_type=transaction_type, quantity=quantity,
+            order_type="MARKET", product="I", tag=f"{idempotency_key}-E",
         )
+        legs: dict[str, Any] = {"entry": entry_res}
+
+        # 2) Protective stop (SL-M) — REQUIRED. If this fails the entry is naked;
+        #    surface the failure loudly instead of pretending the bracket is set.
+        stop_ok = False
+        if stop_loss and stop_loss > 0:
+            try:
+                legs["stop"] = self.place_order(
+                    symbol=symbol, transaction_type=exit_txn, quantity=quantity,
+                    order_type="SL-M", trigger_price=float(stop_loss), product="I",
+                    tag=f"{idempotency_key}-SL",
+                )
+                stop_ok = True
+            except Exception as exc:
+                logger.error("Upstox STOP leg FAILED for %s (position is unprotected!): %s", symbol, exc)
+                legs["stop"] = {"status": False, "error": str(exc)}
+                
+                # C2-05: Emergency flatten if STOP leg fails
+                logger.warning("Emergency flattening entry leg for %s due to STOP leg failure.", symbol)
+                try:
+                    self.place_order(
+                        symbol=symbol, transaction_type=exit_txn, quantity=quantity,
+                        order_type="MARKET", product="I", tag=f"{idempotency_key}-FLATTEN"
+                    )
+                except Exception as flat_exc:
+                    logger.critical("EMERGENCY FLATTEN FAILED for %s: %s", symbol, flat_exc)
+
+        # 3) Target (LIMIT) — best effort; a monitor must cancel this if the stop fills.
+        target_ok = False
+        if take_profit and take_profit > 0 and stop_ok:
+            try:
+                legs["target"] = self.place_order(
+                    symbol=symbol, transaction_type=exit_txn, quantity=quantity,
+                    order_type="LIMIT", price=float(take_profit), product="I",
+                    tag=f"{idempotency_key}-TP",
+                )
+                target_ok = True
+            except Exception as exc:
+                logger.warning("Upstox TARGET leg failed for %s: %s", symbol, exc)
+                legs["target"] = {"status": False, "error": str(exc)}
+
+        # M2-06: Make target success transparent in the overall status
+        status_msg = "Upstox bracket placed"
+        if not stop_ok:
+            status_msg = "Upstox entry placed but STOP leg missing — entry flattened"
+        elif not target_ok and take_profit and take_profit > 0:
+            status_msg = "Upstox bracket placed, but TARGET leg failed"
+
+        return {
+            "status": bool(stop_ok),
+            "target_status": bool(target_ok),
+            "message": status_msg,
+            "data": entry_res.get("data", {}) if isinstance(entry_res, dict) else {},
+            "legs": legs,
+            "requires_oco_monitor": True,
+        }
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         if not is_live_execution() or str(order_id).startswith("PAPER"):

@@ -57,6 +57,9 @@ def main() -> int:
         except Exception:
             continue
         f = res.frame
+        o = f["open"].to_numpy()
+        h = f["high"].to_numpy()
+        l = f["low"].to_numpy()
         c = f["close"].to_numpy()
         fwd = np.full(len(c), np.nan)
         fwd[:-horizon] = (c[horizon:] - c[:-horizon]) / c[:-horizon] * 100.0
@@ -69,13 +72,16 @@ def main() -> int:
         adx = f["adx"].to_numpy()
         rvol = f["relative_volume"].to_numpy()
         hours = f.index.hour + f.index.minute / 60.0
+        from simulation_engine import simulate
         for i in np.flatnonzero(pd.Series(sig).isin(["BUY", "SELL"]).to_numpy()):
-            if i >= len(fwd) or not np.isfinite(fwd[i]):
-                continue
             is_long = sig[i] == "BUY"
+            sim_res = simulate(o, h, l, c, i, is_long, 100.0, 100.0, max_bars=horizon, deduct_costs=False)
+            if sim_res is None:
+                continue
+            out, _ = sim_res
             rows.append({
                 "dir": "LONG" if is_long else "SHORT",
-                "ret": fwd[i] if is_long else -fwd[i],
+                "ret": out,
                 "score": float(score[i]) if np.isfinite(score[i]) else np.nan,
                 "setup": str(setup[i]),
                 "vol": str(vol[i]),

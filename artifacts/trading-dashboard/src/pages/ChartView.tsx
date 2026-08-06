@@ -3,15 +3,20 @@ import { useParams, Link, useLocation } from "wouter";
 import {
   createChart,
   CandlestickSeries,
+  HistogramSeries,
+  LineSeries,
   createSeriesMarkers,
   CrosshairMode,
   LineStyle,
+  TickMarkType,
 } from "lightweight-charts";
 import type { IChartApi, Time, SeriesMarker, PriceLineOptions } from "lightweight-charts";
-import { useGetChart } from "@workspace/api-client-react";
+import { useGetChart, customFetch } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
 import {
-  ArrowLeft, Activity, Target, Shield,
+  ArrowLeft, Activity, Target, Shield, ArrowRight,
   ArrowUpRight, ArrowDownRight, TrendingUp, TrendingDown, Clock, Zap, Layers,
+  History as HistoryIcon,
 } from "lucide-react";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -40,10 +45,92 @@ function fmtDateOnly(unixSec: number): string {
   });
 }
 
+const IST = "Asia/Kolkata";
+
+/**
+ * Format a chart timestamp in IST.
+ *
+ * The backend emits a true UTC epoch (`pd.Timestamp(ts).timestamp()`), and
+ * lightweight-charts renders UTCTimestamp values in UTC unless told otherwise.
+ * Without these formatters an NSE session rendered on the time axis as
+ * 03:45–10:00 instead of 09:15–15:30, while the tooltip helpers above already
+ * converted to IST — so the axis and the tooltip disagreed by 5h30m and every
+ * visual review of a losing trade was read against the wrong clock.
+ *
+ * These convert for DISPLAY only. Never add 19800 to the epoch itself: shifting
+ * the data would desynchronise the crosshair, the signal markers and any
+ * comparison against backend timestamps, trading a visible bug for a silent one.
+ */
+function istTick(unixSec: number, kind: TickMarkType): string {
+  const d = new Date(unixSec * 1000);
+  switch (kind) {
+    case TickMarkType.Year:
+      return d.toLocaleDateString("en-IN", { year: "numeric", timeZone: IST });
+    case TickMarkType.Month:
+      return d.toLocaleDateString("en-IN", { month: "short", year: "2-digit", timeZone: IST });
+    case TickMarkType.DayOfMonth:
+      return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", timeZone: IST });
+    default:
+      return d.toLocaleTimeString("en-IN", {
+        hour: "2-digit", minute: "2-digit", hour12: false, timeZone: IST,
+      });
+  }
+}
+
+function istCrosshair(unixSec: number): string {
+  return new Date(unixSec * 1000).toLocaleString("en-IN", {
+    day: "2-digit", month: "short",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+    timeZone: IST,
+  });
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function addPriceLine(series: any, price: number | null | undefined, color: string, title: string, style = LineStyle.Dashed, width: 1 | 2 = 1) {
-  if (price == null || price <= 0) return;
-  series.createPriceLine({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title } as PriceLineOptions);
+  if (price == null || price <= 0) return null;
+  return series.createPriceLine({ price, color, lineWidth: width, lineStyle: style, axisLabelVisible: true, title } as PriceLineOptions);
+}
+
+// ── Trade History Helpers ─────────────────────────────────────────────────────
+
+type ClosedTrade = {
+  id: number;
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  trade_type: string | null;
+  entry_time: string | null;
+  entry_price: number | null;
+  exit_time: string | null;
+  exit_price: number | null;
+  sl1: number | null;
+  tp1: number | null;
+  exit_reason: string;
+  pnl_pct: number | null;
+};
+
+function fmtTenure(entryIso: string | null, exitIso: string | null): string {
+  if (!entryIso || !exitIso) return "—";
+  try {
+    const ms = new Date(exitIso).getTime() - new Date(entryIso).getTime();
+    if (isNaN(ms) || ms < 0) return "—";
+    const hrs = ms / (1000 * 60 * 60);
+    if (hrs < 1) return `${Math.round(hrs * 60)}m`;
+    if (hrs < 24) return `${hrs.toFixed(1)}h`;
+    return `${(hrs / 24).toFixed(1)}d`;
+  } catch { return "—"; }
+}
+
+function exitReasonBadge(reason: string): { label: string; cls: string } {
+  const r = reason.toUpperCase();
+  if (r.includes("SL2") || r.includes("MAX LOSS")) return { label: reason, cls: "bg-red-600/20 text-red-300 border-red-600/40" };
+  if (r.includes("SL")) return { label: reason, cls: "bg-signal-sell/15 text-signal-sell border-signal-sell/30" };
+  if (r.includes("T1") || r.includes("T2") || r.includes("T3") || r.includes("TARGET") || r.includes("BOOKED")) return { label: reason, cls: "bg-signal-buy/15 text-signal-buy border-signal-buy/30" };
+  if (r.includes("TSL")) return { label: reason, cls: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30" };
+  if (r.includes("REPAINT")) return { label: reason, cls: "bg-amber-500/15 text-amber-300 border-amber-500/30" };
+  if (r.includes("MOMENTUM")) return { label: reason, cls: "bg-blue-500/15 text-blue-300 border-blue-500/30" };
+  if (r.includes("EOD") || r.includes("SESSION")) return { label: reason, cls: "bg-purple-500/15 text-purple-300 border-purple-500/30" };
+  return { label: reason || "—", cls: "bg-muted/30 text-muted-foreground border-border" };
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -57,7 +144,15 @@ export default function ChartView() {
   const seriesRef   = useRef<any>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersRef  = useRef<any>(null);
+  const priceLinesRef = useRef<any[]>([]);
+  // MACD sub-chart refs
+  const macdContainerRef = useRef<HTMLDivElement>(null);
+  const macdChartRef = useRef<IChartApi | null>(null);
+  const macdHistRef = useRef<any>(null);
+  const macdLineRef = useRef<any>(null);
+  const macdSignalRef = useRef<any>(null);
   const [chartReady, setChartReady] = useState(false);
+  const [macdHeader, setMacdHeader] = useState({ macd: 0, signal: 0, hist: 0 });
 
   const safeSymbol    = symbol    || "NIFTY";
   const safeTimeframe = timeframe || "15m";
@@ -74,6 +169,14 @@ export default function ChartView() {
       queryKey: ["/api/chart", safeSymbol, safeTimeframe],
     },
   });
+
+  // Fetch closed trades for this symbol from the history API
+  const { data: historyData } = useQuery({
+    queryKey: ["/api/history", safeSymbol],
+    queryFn: () => customFetch<{ trades: ClosedTrade[]; total: number }>(`/api/history?symbol=${encodeURIComponent(safeSymbol)}&limit=50`),
+    refetchInterval: 30000,
+  });
+  const closedTrades = historyData?.trades ?? [];
 
   // ── Create chart once ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -98,6 +201,13 @@ export default function ChartView() {
         borderColor: "#1E293B",
         timeVisible: true,
         secondsVisible: false,
+        // NSE trades 09:15-15:30 IST. Without this the axis reads 03:45-10:00.
+        tickMarkFormatter: (time: Time, tickMarkType: TickMarkType) =>
+          istTick(time as number, tickMarkType),
+      },
+      localization: {
+        // Crosshair / tooltip clock, kept consistent with the axis above.
+        timeFormatter: (time: Time) => istCrosshair(time as number),
       },
       rightPriceScale: { borderColor: "#1E293B" },
       autoSize: true,
@@ -127,19 +237,156 @@ export default function ChartView() {
     };
   }, []);
 
+  // ── Create MACD sub-chart ─────────────────────────────────────────────────
+  useEffect(() => {
+    if (!macdContainerRef.current) return;
+
+    const macdChart = createChart(macdContainerRef.current, {
+      layout: {
+        background: { color: "#090E17" },
+        textColor:  "#94A3B8",
+        fontFamily: "monospace",
+      },
+      grid: {
+        vertLines: { color: "#1E293B" },
+        horzLines: { color: "#1E293B44" },
+      },
+      crosshair: {
+        mode: CrosshairMode.Normal,
+        vertLine: { width: 1, color: "#475569", style: LineStyle.Dotted },
+        horzLine: { width: 1, color: "#475569", style: LineStyle.Dotted },
+      },
+      timeScale: {
+        borderColor: "#1E293B",
+        timeVisible: true,
+        secondsVisible: false,
+        tickMarkFormatter: (time: Time, tickMarkType: TickMarkType) =>
+          istTick(time as number, tickMarkType),
+      },
+      localization: {
+        timeFormatter: (time: Time) => istCrosshair(time as number),
+      },
+      rightPriceScale: { borderColor: "#1E293B" },
+      autoSize: true,
+    });
+
+    const histSeries = macdChart.addSeries(HistogramSeries, {
+      priceLineVisible: false,
+      lastValueVisible: false,
+      priceFormat: { type: "price", precision: 4, minMove: 0.0001 },
+    });
+    const macdLine = macdChart.addSeries(LineSeries, {
+      color: "#2962FF",
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      priceFormat: { type: "price", precision: 4, minMove: 0.0001 },
+    });
+    const signalLine = macdChart.addSeries(LineSeries, {
+      color: "#FF6D00",
+      lineWidth: 1,
+      priceLineVisible: false,
+      lastValueVisible: false,
+      priceFormat: { type: "price", precision: 4, minMove: 0.0001 },
+    });
+
+    macdChartRef.current = macdChart;
+    macdHistRef.current = histSeries;
+    macdLineRef.current = macdLine;
+    macdSignalRef.current = signalLine;
+
+    const onResize = () => macdChart.applyOptions({ autoSize: true });
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      macdChart.remove();
+      macdChartRef.current = null;
+      macdHistRef.current = null;
+      macdLineRef.current = null;
+      macdSignalRef.current = null;
+    };
+  }, []);
+
+  // ── Crosshair + TimeScale sync between main and MACD charts ───────────────
+  useEffect(() => {
+    const mainChart = chartRef.current;
+    const macdChart = macdChartRef.current;
+    if (!mainChart || !macdChart) return;
+
+    let syncingCrosshair = false;
+    let syncingRange = false;
+
+    const onMainCrosshair = (param: any) => {
+      if (syncingCrosshair) return;
+      syncingCrosshair = true;
+      try {
+        if (param.time && macdHistRef.current) {
+          macdChart.setCrosshairPosition(NaN, param.time, macdHistRef.current);
+        } else {
+          macdChart.clearCrosshairPosition();
+        }
+      } catch { /* chart may be disposed */ }
+      syncingCrosshair = false;
+    };
+    const onMacdCrosshair = (param: any) => {
+      if (syncingCrosshair) return;
+      syncingCrosshair = true;
+      try {
+        if (param.time && seriesRef.current) {
+          mainChart.setCrosshairPosition(NaN, param.time, seriesRef.current);
+          // Update MACD header values from crosshair position
+          const histVal = param.seriesData?.get(macdHistRef.current);
+          const macdVal = param.seriesData?.get(macdLineRef.current);
+          const sigVal = param.seriesData?.get(macdSignalRef.current);
+          if (macdVal) {
+            setMacdHeader({
+              macd: macdVal.value ?? 0,
+              signal: sigVal?.value ?? 0,
+              hist: histVal?.value ?? 0,
+            });
+          }
+        } else {
+          mainChart.clearCrosshairPosition();
+        }
+      } catch { /* chart may be disposed */ }
+      syncingCrosshair = false;
+    };
+    const onMainRange = (range: any) => {
+      if (syncingRange || !range) return;
+      syncingRange = true;
+      try { macdChart.timeScale().setVisibleLogicalRange(range); } catch {}
+      syncingRange = false;
+    };
+    const onMacdRange = (range: any) => {
+      if (syncingRange || !range) return;
+      syncingRange = true;
+      try { mainChart.timeScale().setVisibleLogicalRange(range); } catch {}
+      syncingRange = false;
+    };
+
+    mainChart.subscribeCrosshairMove(onMainCrosshair);
+    macdChart.subscribeCrosshairMove(onMacdCrosshair);
+    mainChart.timeScale().subscribeVisibleLogicalRangeChange(onMainRange);
+    macdChart.timeScale().subscribeVisibleLogicalRangeChange(onMacdRange);
+
+    return () => {
+      try { mainChart.unsubscribeCrosshairMove(onMainCrosshair); } catch {}
+      try { macdChart.unsubscribeCrosshairMove(onMacdCrosshair); } catch {}
+      try { mainChart.timeScale().unsubscribeVisibleLogicalRangeChange(onMainRange); } catch {}
+      try { macdChart.timeScale().unsubscribeVisibleLogicalRangeChange(onMacdRange); } catch {}
+    };
+  }, [chartReady]);
+
   // ── Update when chartData changes ──────────────────────────────────────────
   useEffect(() => {
     const series = seriesRef.current;
     const chart  = chartRef.current;
     if (!series || !chart || !chartData || !chartReady) return;
 
-    // ── Apply IST Offset (5h 30m) so chart displays correctly in IST ──
-    const IST_OFFSET = 19800; // 5.5 * 60 * 60 seconds
-
     // Candles — API already sends Unix seconds (UTC)
     const seen = new Set<number>();
     const candles = chartData.candles
-      .map(c => ({ time: (c.time + IST_OFFSET) as Time, open: c.open, high: c.high, low: c.low, close: c.close }))
+      .map(c => ({ time: c.time as Time, open: c.open, high: c.high, low: c.low, close: c.close }))
       .filter(c => { const t = c.time as number; if (seen.has(t)) return false; seen.add(t); return true; })
       .sort((a, b) => (a.time as number) - (b.time as number));
 
@@ -156,7 +403,7 @@ export default function ChartView() {
       const seenMarkerTimes = new Set<number>();
       const markers: SeriesMarker<Time>[] = chartData.signals
         .map(s => ({
-          time:     (s.time + IST_OFFSET) as Time,
+          time:     s.time as Time,
           position: s.type === "BUY" ? "belowBar" as const : "aboveBar" as const,
           color:    s.type === "BUY" ? "#00FF66" : "#FF3366",
           shape:    s.type === "BUY" ? "arrowUp"  as const : "arrowDown" as const,
@@ -176,18 +423,68 @@ export default function ChartView() {
     }
 
     // Price lines for active trade (setData wipes them, so redraw after)
+    priceLinesRef.current.forEach(pl => {
+      try { series.removePriceLine(pl); } catch {}
+    });
+    priceLinesRef.current = [];
+
     if (chartData.active_trade) {
       const t = chartData.active_trade;
-      addPriceLine(series, t.entry_price, "#F8FAFC", "ENTRY", LineStyle.Dashed, 2);
-      addPriceLine(series, t.sl1,         "#FF3366", "SL1",   LineStyle.Dashed);
-      addPriceLine(series, t.sl2,         "#FF6688", "SL2",   LineStyle.Dotted);
-      addPriceLine(series, t.tsl,         "#FF9900", "TSL",   LineStyle.LargeDashed);
-      addPriceLine(series, t.tp1, "#00FF66", t.t1_hit ? "T1 ✓" : "T1", t.t1_hit ? LineStyle.Dotted : LineStyle.Dashed);
-      addPriceLine(series, t.tp2, "#00DD55", t.t2_hit ? "T2 ✓" : "T2", t.t2_hit ? LineStyle.Dotted : LineStyle.Dashed);
-      addPriceLine(series, t.tp3, "#00BB44", t.t3_hit ? "T3 ✓" : "T3", t.t3_hit ? LineStyle.Dotted : LineStyle.Dashed);
+      const lines = [
+        addPriceLine(series, t.entry_price, "#F8FAFC", "ENTRY", LineStyle.Dashed, 2),
+        addPriceLine(series, t.sl1,         "#FF3366", "SL1",   LineStyle.Dashed),
+        addPriceLine(series, t.sl2,         "#FF6688", "SL2",   LineStyle.Dotted),
+        addPriceLine(series, t.tsl,         "#FF9900", "TSL",   LineStyle.LargeDashed),
+        addPriceLine(series, t.tp1, "#00FF66", t.t1_hit ? "T1 ✓" : "T1", t.t1_hit ? LineStyle.Dotted : LineStyle.Dashed),
+        addPriceLine(series, t.tp2, "#00DD55", t.t2_hit ? "T2 ✓" : "T2", t.t2_hit ? LineStyle.Dotted : LineStyle.Dashed),
+        addPriceLine(series, t.tp3, "#00BB44", t.t3_hit ? "T3 ✓" : "T3", t.t3_hit ? LineStyle.Dotted : LineStyle.Dashed)
+      ].filter(Boolean);
+      priceLinesRef.current = lines;
     }
 
     try { chart.timeScale().fitContent(); } catch { /* */ }
+
+    // ── Update MACD sub-chart data ──────────────────────────────────────────
+    const macdChart = macdChartRef.current;
+    const chartDataAny = chartData as any;
+    if (macdChart && chartDataAny?.macd?.length) {
+      const macdArr = chartDataAny.macd as { time: number; macd: number; signal: number; histogram: number }[];
+      const seenMacd = new Set<number>();
+      const sorted = macdArr
+        .filter(m => { if (seenMacd.has(m.time)) return false; seenMacd.add(m.time); return true; })
+        .sort((a, b) => a.time - b.time);
+
+      // Histogram (green when >= 0, red when < 0)
+      try {
+        macdHistRef.current?.setData(
+          sorted.map(m => ({
+            time: m.time as Time,
+            value: m.histogram,
+            color: m.histogram >= 0 ? "#26A69A" : "#EF5350",
+          }))
+        );
+      } catch (e) { console.error("MACD hist:", e); }
+
+      // MACD line
+      try {
+        macdLineRef.current?.setData(
+          sorted.map(m => ({ time: m.time as Time, value: m.macd }))
+        );
+      } catch (e) { console.error("MACD line:", e); }
+
+      // Signal line
+      try {
+        macdSignalRef.current?.setData(
+          sorted.map(m => ({ time: m.time as Time, value: m.signal }))
+        );
+      } catch (e) { console.error("MACD signal:", e); }
+
+      // Update header with latest values
+      const last = sorted[sorted.length - 1];
+      if (last) setMacdHeader({ macd: last.macd, signal: last.signal, hist: last.histogram });
+
+      try { macdChart.timeScale().fitContent(); } catch {}
+    }
   }, [chartData, chartReady]);
 
   // ── Live P&L ───────────────────────────────────────────────────────────────
@@ -253,20 +550,36 @@ export default function ChartView() {
       </div>
 
       <div className="flex-1 flex overflow-hidden relative">
-        <div className="flex-1 relative bg-background">
-          <div className="absolute inset-0" ref={chartContainerRef} />
-          
-          {(isLoading || (!error && chartData?.candles.length === 0)) && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center text-muted-foreground text-sm font-mono bg-background/80 backdrop-blur-sm">
-              {isLoading ? "Loading chart data..." : "Preparing chart data..."}
+        <div className="flex-1 flex flex-col bg-background">
+          {/* Main candlestick chart — 75% */}
+          <div className="relative" style={{ flex: "3 1 0%" }}>
+            <div className="absolute inset-0" ref={chartContainerRef} />
+
+            {(isLoading || (!error && chartData?.candles.length === 0)) && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center text-muted-foreground text-sm font-mono bg-background/80 backdrop-blur-sm">
+                {isLoading ? "Loading chart data..." : "Preparing chart data..."}
+              </div>
+            )}
+
+            {error && (
+              <div className="absolute inset-0 z-10 flex items-center justify-center text-destructive text-sm font-mono bg-background/80 backdrop-blur-sm">
+                Failed to load chart
+              </div>
+            )}
+          </div>
+
+          {/* MACD sub-chart — 25% */}
+          <div className="relative border-t border-border" style={{ flex: "1 1 0%" }}>
+            {/* MACD header overlay */}
+            <div className="absolute top-1 left-2 z-10 flex items-center gap-2 text-[11px] font-mono pointer-events-none">
+              <span className="text-muted-foreground font-bold">MACD</span>
+              <span className="text-muted-foreground">12 26 close 9</span>
+              <span className="text-[#2962FF] font-bold">{macdHeader.macd.toFixed(2)}</span>
+              <span className="text-[#FF6D00] font-bold">{macdHeader.signal.toFixed(2)}</span>
+              <span className={`font-bold ${macdHeader.hist >= 0 ? "text-[#26A69A]" : "text-[#EF5350]"}`}>{macdHeader.hist >= 0 ? "+" : ""}{macdHeader.hist.toFixed(2)}</span>
             </div>
-          )}
-          
-          {error && (
-            <div className="absolute inset-0 z-10 flex items-center justify-center text-destructive text-sm font-mono bg-background/80 backdrop-blur-sm">
-              Failed to load chart
-            </div>
-          )}
+            <div className="absolute inset-0" ref={macdContainerRef} />
+          </div>
         </div>
 
         {/* Side Panel */}
@@ -435,45 +748,158 @@ export default function ChartView() {
             </div>
           )}
 
-          {/* ── Signal History ── */}
+          {/* ── Other Timeframes ── */}
+          {chartData?.other_active_trades && Object.keys(chartData.other_active_trades).length > 0 && (
+            <div className="p-4 border-b border-border bg-card/40">
+              <h3 className="font-bold text-xs uppercase tracking-wider mb-3 text-muted-foreground flex items-center gap-1.5">
+                <Layers className="h-3.5 w-3.5" /> Other Timeframes
+              </h3>
+              <div className="space-y-2">
+                {Object.entries(chartData.other_active_trades).map(([tf, oat]: [string, any]) => {
+                  const oatDir = oat.direction === "LONG" ? "BUY" : oat.direction === "SHORT" ? "SELL" : oat.direction;
+                  const oatPnlPct = oat.entry_price && currentPrice
+                    ? ((currentPrice - oat.entry_price) / oat.entry_price * 100) * (oatDir === "BUY" ? 1 : -1)
+                    : null;
+                  
+                  return (
+                    <div key={tf} className="border border-border rounded bg-background p-2.5 space-y-2 relative overflow-hidden">
+                      <div className={`absolute left-0 top-0 bottom-0 w-1 ${oatDir === "BUY" ? "bg-signal-buy" : "bg-signal-sell"}`} />
+                      
+                      <div className="flex items-center justify-between pl-2">
+                        <div className="flex items-center gap-2">
+                          <span className="px-1.5 py-0.5 bg-muted text-muted-foreground font-mono text-[10px] rounded font-bold">
+                            {tf}
+                          </span>
+                          <span className={`text-[11px] font-bold tracking-wider ${oatDir === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>
+                            {oatDir}
+                          </span>
+                        </div>
+                        {oatPnlPct != null && (
+                          <span className={`text-xs font-mono font-bold ${oatPnlPct >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                            {oatPnlPct >= 0 ? "+" : ""}{oatPnlPct.toFixed(2)}%
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center justify-between pl-2 text-[11px] font-mono">
+                        <div className="text-muted-foreground">
+                          EP: <span className="text-foreground font-bold tabular-nums">₹{oat.entry_price?.toFixed(2) ?? "—"}</span>
+                        </div>
+                        <div className="flex items-center gap-2 text-xs">
+                          {oat.sl1 != null && <span className="text-signal-sell/80">SL: ₹{oat.sl1.toFixed(1)}</span>}
+                          {oat.tp1 != null && <span className="text-signal-buy/80">T1: ₹{oat.tp1.toFixed(1)}</span>}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {/* ── Signal History (enriched with trade outcomes) ── */}
           <div className="p-4 flex-1">
-            <h3 className="font-bold text-xs uppercase tracking-wider mb-3 text-muted-foreground">
-              Signal History ({chartData?.signals?.length ?? 0})
-            </h3>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-bold text-xs uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
+                <HistoryIcon className="h-3.5 w-3.5" />
+                Signal History ({chartData?.signals?.length ?? 0})
+              </h3>
+              <Link href="/history" className="text-[10px] text-primary hover:text-primary/80 font-medium flex items-center gap-0.5">
+                All Trades <ArrowRight className="h-2.5 w-2.5" />
+              </Link>
+            </div>
             <div className="space-y-2">
-              {chartData?.signals?.slice().reverse().slice(0, 12).map((sig, i) => (
-                <div key={i} className="flex items-start gap-2 p-2 rounded bg-background border border-border">
-                  <div className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-1 ${sig.type === "BUY" ? "bg-signal-buy" : "bg-signal-sell"}`} />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between">
-                      <span className={`text-xs font-bold ${sig.type === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>
-                        {sig.type}
-                      </span>
-                      <span className="font-mono text-xs font-medium tabular-nums">₹{sig.price > 0 ? sig.price.toFixed(2) : "—"}</span>
-                    </div>
-                    {/* Bar time — when signal candle closed */}
-                    <div className="text-[10px] text-muted-foreground font-mono mt-0.5">
-                      Bar: {fmtDateOnly(sig.time)} {fmtTimeOnly(sig.time)}
-                    </div>
-                    <div className="flex items-center justify-between mt-0.5">
-                      <span className="text-[10px] text-muted-foreground">{sig.setup || "—"}</span>
-                      {sig.score != null && sig.score > 0 && (
-                        <span className="text-[10px] text-muted-foreground font-mono">score {sig.score.toFixed(0)}</span>
+              {chartData?.signals?.slice().reverse().slice(0, 10).map((sig) => {
+                const sigDir = sig.type;
+                const sigTimeMs = (sig.time as number) * 1000;
+                let matchedTrade: ClosedTrade | null = null;
+                let bestDiff = Infinity;
+                for (const t of closedTrades) {
+                  const tDir = t.direction === "LONG" ? "BUY" : t.direction === "SHORT" ? "SELL" : t.direction;
+                  if (tDir !== sigDir || !t.entry_time) continue;
+                  const diff = Math.abs(new Date(t.entry_time).getTime() - sigTimeMs);
+                  if (diff < 48 * 3600000 && diff < bestDiff) { bestDiff = diff; matchedTrade = t; }
+                }
+                const pnl = matchedTrade?.pnl_pct ?? null;
+                const isWin = pnl != null && pnl > 0;
+                const isLoss = pnl != null && pnl < 0;
+                const badge = matchedTrade ? exitReasonBadge(matchedTrade.exit_reason) : null;
+                const tenure = matchedTrade ? fmtTenure(matchedTrade.entry_time, matchedTrade.exit_time) : null;
+
+                return (
+                  <div key={sig.time} className={`p-2.5 rounded border overflow-hidden relative ${
+                    isWin ? "bg-signal-buy/[0.04] border-signal-buy/20" :
+                    isLoss ? "bg-signal-sell/[0.04] border-signal-sell/20" :
+                    "bg-background border-border"
+                  }`}>
+                    <div className={`absolute left-0 top-0 bottom-0 w-1 ${
+                      isWin ? "bg-signal-buy" : isLoss ? "bg-signal-sell" : sig.type === "BUY" ? "bg-signal-buy/40" : "bg-signal-sell/40"
+                    }`} />
+                    <div className="pl-2">
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-1.5">
+                          <span className={`text-xs font-bold ${sig.type === "BUY" ? "text-signal-buy" : "text-signal-sell"}`}>
+                            {sig.type === "BUY" ? "↗" : "↘"} {sig.type}
+                          </span>
+                          <span className="font-mono text-xs font-medium tabular-nums">₹{sig.price > 0 ? sig.price.toFixed(2) : "—"}</span>
+                        </div>
+                        {pnl != null ? (
+                          <span className={`font-mono text-xs font-bold tabular-nums ${isWin ? "text-signal-buy" : isLoss ? "text-signal-sell" : "text-muted-foreground"}`}>
+                            {pnl >= 0 ? "+" : ""}{pnl.toFixed(2)}%
+                          </span>
+                        ) : (
+                          <span className="text-[9px] text-muted-foreground italic">pending</span>
+                        )}
+                      </div>
+                      <div className="flex items-center justify-between mt-0.5">
+                        <span className="text-[10px] text-muted-foreground font-mono">
+                          Bar: {fmtDateOnly(sig.time)} {fmtTimeOnly(sig.time)}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-muted-foreground">{sig.setup || "—"}</span>
+                          {sig.score != null && sig.score > 0 && (
+                            <span className="text-[10px] text-muted-foreground font-mono">score {sig.score.toFixed(0)}</span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="flex gap-2 mt-0.5 text-[10px] font-mono">
+                        {sig.sl != null && <span className="text-signal-sell/70">SL ₹{sig.sl.toFixed(2)}</span>}
+                        {sig.tp1 != null && <span className="text-signal-buy/70">T1 ₹{sig.tp1.toFixed(2)}</span>}
+                      </div>
+                      {matchedTrade && (
+                        <div className="mt-1.5 pt-1.5 border-t border-border/50">
+                          <div className="flex items-center gap-1.5 text-[11px] font-mono mb-0.5">
+                            <span className="text-muted-foreground">₹{matchedTrade.entry_price?.toFixed(2) ?? "—"}</span>
+                            <ArrowRight className="h-2.5 w-2.5 text-muted-foreground/50 flex-shrink-0" />
+                            <span className={isWin ? "text-signal-buy font-bold" : isLoss ? "text-signal-sell font-bold" : "text-foreground"}>
+                              ₹{matchedTrade.exit_price?.toFixed(2) ?? "—"}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-1.5">
+                              {badge && <span className={`rounded border px-1 py-0.5 text-[9px] font-bold ${badge.cls}`}>{badge.label}</span>}
+                              {tenure && (
+                                <span className="text-[9px] text-muted-foreground font-mono flex items-center gap-0.5">
+                                  <Clock className="h-2.5 w-2.5" />{tenure}
+                                </span>
+                              )}
+                            </div>
+                            <span className="text-[9px] text-muted-foreground font-mono">
+                              {matchedTrade.exit_time ? fmtDateTime(matchedTrade.exit_time) : "—"}
+                            </span>
+                          </div>
+                        </div>
                       )}
                     </div>
-                    {/* SL / TP summary */}
-                    <div className="flex gap-2 mt-0.5 text-[10px] font-mono">
-                      {sig.sl != null && <span className="text-signal-sell/70">SL ₹{sig.sl.toFixed(2)}</span>}
-                      {sig.tp1 != null && <span className="text-signal-buy/70">T1 ₹{sig.tp1.toFixed(2)}</span>}
-                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
               {(!chartData?.signals || chartData.signals.length === 0) && (
                 <div className="text-xs text-muted-foreground text-center py-4 italic">No signals on this chart.</div>
               )}
             </div>
           </div>
+
         </div>
       </div>
     </div>

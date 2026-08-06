@@ -12,7 +12,8 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime
+import copy
+from datetime import datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
@@ -20,6 +21,16 @@ import requests
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
+
+def _bucket_start(ts: datetime) -> Optional[datetime]:
+    ts = ts.astimezone(IST_TZ)
+    day_open = ts.replace(hour=9, minute=15, second=0, microsecond=0)
+    if ts < day_open:
+        return None
+    minutes = int((ts - day_open).total_seconds() // 60)
+    if minutes >= 375:
+        minutes = 374
+    return day_open + timedelta(minutes=(minutes // 15) * 15)
 
 try:
     import websocket
@@ -32,12 +43,16 @@ class UpstoxFeed:
 
     def __init__(self) -> None:
         self._ws: Optional[Any] = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._connected = threading.Event()
+        self._stop = threading.Event()
         self._stop_requested = False
         self._subscribed_keys: set[str] = set()
         self._forming_candles: dict[str, dict[str, Any]] = {}
         self._completed_candles: dict[str, list[dict[str, Any]]] = {}
+        # Day-cumulative volume at the current bucket's open, so per-candle
+        # volume is a delta (Upstox full-feed 'v' is cumulative for the day).
+        self._cum_at_bucket: dict[str, float] = {}
         self._option_quotes: dict[str, dict[str, Any]] = {}
         self._last_packet_time: float = 0.0
         self._thread: Optional[threading.Thread] = None
@@ -55,8 +70,21 @@ class UpstoxFeed:
                 self._resubscribe()
                 return
             self._stop_requested = False
+            self._stop.clear()
             self._thread = threading.Thread(target=self._run_loop, name="upstox-feed", daemon=True)
             self._thread.start()
+
+    def stop(self) -> None:
+        """Stop the feed and close the websocket connection."""
+        self._stop_requested = True
+        self._stop.set()
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
 
     def is_connected(self) -> bool:
         return self._connected.is_set()
@@ -69,7 +97,7 @@ class UpstoxFeed:
     def get_forming_candle(self, instrument_key: str) -> Optional[dict[str, Any]]:
         with self._lock:
             candle = self._forming_candles.get(instrument_key)
-            return dict(candle) if candle else None
+            return copy.deepcopy(candle) if candle else None
 
     def get_completed_candles(self, instrument_key: str, since: Optional[datetime] = None) -> list[dict[str, Any]]:
         with self._lock:
@@ -113,7 +141,8 @@ class UpstoxFeed:
         while not self._stop_requested:
             auth_url = self._get_auth_url()
             if not auth_url:
-                time.sleep(backoff)
+                if self._stop.wait(backoff):
+                    break
                 backoff = min(backoff * 1.5, 30.0)
                 continue
 
@@ -131,7 +160,8 @@ class UpstoxFeed:
 
             self._connected.clear()
             if not self._stop_requested:
-                time.sleep(backoff)
+                if self._stop.wait(backoff):
+                    break
                 backoff = min(backoff * 1.5, 30.0)
 
     def _on_open(self, ws: Any) -> None:
@@ -163,14 +193,23 @@ class UpstoxFeed:
     def _on_message(self, ws: Any, message: Any) -> None:
         self._last_packet_time = time.monotonic()
         try:
-            # Upstox v2 feed returns JSON text or binary protobuf. If text/JSON:
             if isinstance(message, bytes):
-                # Attempt decode JSON or log binary
                 try:
-                    message = message.decode("utf-8")
+                    # Attempt decode JSON or log binary
+                    message_str = message.decode("utf-8")
+                    data = json.loads(message_str)
                 except UnicodeDecodeError:
-                    return
-            data = json.loads(message)
+                    try:
+                        import upstox_client.feeder.proto.MarketDataFeedV3_pb2 as pb
+                        from google.protobuf.json_format import MessageToDict
+                        feed_resp = pb.FeedResponse()
+                        feed_resp.ParseFromString(message)
+                        data = MessageToDict(feed_resp, preserving_proto_field_name=True)
+                    except Exception as e:
+                        logger.warning("Upstox Protobuf decode failed: %s", e)
+                        return
+            else:
+                data = json.loads(message)
             feeds = data.get("feeds", {}) if isinstance(data, dict) else {}
             for inst_key, feed_item in feeds.items():
                 if not isinstance(feed_item, dict):
@@ -194,9 +233,11 @@ class UpstoxFeed:
 
                 # Update forming candle
                 now_ist = datetime.now(IST_TZ)
-                bucket_min = (now_ist.minute // 15) * 15
-                bucket_start = now_ist.replace(minute=bucket_min, second=0, microsecond=0)
+                bucket_start = _bucket_start(now_ist)
+                if not bucket_start:
+                    continue
 
+                cum_volume = float(ff.get("v") or ff.get("volume") or 0.0)
                 with self._lock:
                     fc = self._forming_candles.get(inst_key)
                     if not fc or fc["start"] != bucket_start:
@@ -204,28 +245,32 @@ class UpstoxFeed:
                             self._completed_candles.setdefault(inst_key, []).append(dict(fc))
                             # Keep last 100 completed candles
                             self._completed_candles[inst_key] = self._completed_candles[inst_key][-100:]
+                        # Anchor the cumulative-volume baseline at bucket open so
+                        # this candle's volume is the delta traded within it.
+                        self._cum_at_bucket[inst_key] = cum_volume
                         self._forming_candles[inst_key] = {
                             "start": bucket_start,
                             "open": ltp,
                             "high": ltp,
                             "low": ltp,
                             "close": ltp,
-                            "volume": float(ff.get("v") or ff.get("volume") or 0.0),
+                            "volume": 0.0,
                         }
                     else:
                         fc["high"] = max(fc["high"], ltp)
                         fc["low"] = min(fc["low"], ltp)
                         fc["close"] = ltp
-                        if ff.get("v") or ff.get("volume"):
-                            fc["volume"] = float(ff.get("v") or ff.get("volume") or fc["volume"])
+                        if cum_volume > 0:
+                            base = self._cum_at_bucket.get(inst_key, cum_volume)
+                            fc["volume"] = max(0.0, cum_volume - base)
         except Exception:
             pass
 
     def _on_error(self, ws: Any, error: Any) -> None:
-        logger.debug("Upstox WS feed error: %s", error)
+        logger.warning("Upstox WS feed error: %s", error)
 
     def _on_close(self, ws: Any, close_status_code: Any, close_msg: Any) -> None:
-        logger.info("Upstox WS feed closed (%s: %s)", close_status_code, close_msg)
+        logger.warning("Upstox WS feed closed (%s: %s)", close_status_code, close_msg)
         self._connected.clear()
 
 

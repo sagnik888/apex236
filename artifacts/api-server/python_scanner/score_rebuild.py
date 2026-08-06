@@ -21,6 +21,7 @@ import pandas as pd
 
 from apex_python_scanner import ApexConfig, ApexScanner
 from scoring_model import ApexScoreModel, auc, ic_significance, rank_ic
+from simulation_engine import simulate
 
 HERE = Path(__file__).resolve().parent
 CACHE = HERE / "angel_cache"
@@ -51,27 +52,6 @@ def load_cached(interval: str, limit: int):
             break
     return frames
 
-
-def simulate(o, h, l, c, i, is_long, tp_pct, sl_pct, max_bars=200):
-    if i + 1 >= len(o):
-        return None
-    entry = float(o[i + 1])
-    if not np.isfinite(entry) or entry <= 0:
-        return None
-    sign = 1.0 if is_long else -1.0
-    tp = entry * (1 + sign * tp_pct / 100.0)
-    sl = entry * (1 - sign * sl_pct / 100.0)
-    for k in range(i + 1, min(i + 1 + max_bars, len(o))):
-        if is_long:
-            if o[k] <= sl: return (o[k] - entry) / entry * 100.0
-            if l[k] <= sl: return (sl - entry) / entry * 100.0
-            if h[k] >= tp: return (tp - entry) / entry * 100.0
-        else:
-            if o[k] >= sl: return (entry - o[k]) / entry * 100.0
-            if h[k] >= sl: return (entry - sl) / entry * 100.0
-            if l[k] <= tp: return (entry - tp) / entry * 100.0
-    last = float(c[min(i + max_bars, len(o) - 1)])
-    return sign * (last - entry) / entry * 100.0
 
 
 def build_dataset(limit: int) -> pd.DataFrame:
@@ -108,9 +88,17 @@ def build_dataset(limit: int) -> pd.DataFrame:
 
         for i in np.flatnonzero(pd.Series(sig).isin(["BUY", "SELL"]).to_numpy()):
             i = int(i)
-            out = simulate(o, h, l, c, i, sig[i] == "BUY", TP, SL)
-            if out is None:
-                continue
+            # Intraday trades must square off by EOD (15:30). Each 15m bar = 0.25h.
+            bars_to_eod = 200
+            h_val = hours[i]
+            if h_val < 15.5:
+                bars_to_eod = int(max(1, (15.5 - h_val) * 4)) - 1
+                if bars_to_eod <= 0:
+                    continue
+            
+            sim_res = simulate(o, h, l, c, i, sig[i] == "BUY", TP, SL, max_bars=bars_to_eod, deduct_costs=False)
+            if sim_res is None: continue
+            out, _ = sim_res
             is_long = sig[i] == "BUY"
             d = 1.0 if is_long else -1.0
             px = c[i]
@@ -134,12 +122,12 @@ def build_dataset(limit: int) -> pd.DataFrame:
                 "atr_exp": atr_exp[i],
                 "atr_pct": a / px * 100 if (np.isfinite(a) and px) else np.nan,
                 "body_pos_dir": body_pos[i] if is_long else 1 - body_pos[i],
-                "body_atr": body_abs[i] / a if np.isfinite(a) else np.nan,
-                "macd_hist_n": macd_hist[i] / a * d if np.isfinite(a) else np.nan,
-                "dist_ema21": (px - ema21[i]) / px * 100 * d,
-                "dist_ema50": (px - ema50[i]) / px * 100 * d,
-                "dist_ema200": (px - ema200[i]) / px * 100 * d,
-                "dist_vwap": (px - vwap[i]) / px * 100 * d,
+                "body_atr": body_abs[i] / a if (np.isfinite(a) and a != 0) else np.nan,
+                "macd_hist_n": macd_hist[i] / a * d if (np.isfinite(a) and a != 0) else np.nan,
+                "dist_ema21": (px - ema21[i]) / px * 100 * d if px else np.nan,
+                "dist_ema50": (px - ema50[i]) / px * 100 * d if px else np.nan,
+                "dist_ema200": (px - ema200[i]) / px * 100 * d if px else np.nan,
+                "dist_vwap": (px - vwap[i]) / px * 100 * d if px else np.nan,
                 "hour": hours[i],
                 "is_long": 1.0 if is_long else 0.0,
                 "aligned_trend": 1.0 if (bull_tr[i] if is_long else bear_tr[i]) else 0.0,

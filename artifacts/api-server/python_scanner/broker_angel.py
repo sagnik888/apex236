@@ -18,16 +18,36 @@ import logging
 import os
 import threading
 import time
+import socket
+import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-import uuid
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
 
 from simulation_engine import is_live_execution
+
+def _get_mac() -> str:
+    mac_num = hex(uuid.getnode()).replace('0x', '').upper()
+    mac_num = mac_num.zfill(12)
+    return ':'.join(mac_num[i: i + 2] for i in range(0, 12, 2))
+
+def _get_local_ip() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(('10.255.255.255', 1))
+        IP = s.getsockname()[0]
+    except Exception:
+        IP = '127.0.0.1'
+    finally:
+        s.close()
+    return IP
+
+_LOCAL_IP = _get_local_ip()
+_MAC_ADDR = _get_mac()
 
 logger = logging.getLogger(__name__)
 
@@ -137,9 +157,9 @@ class AngelClient:
             "Accept": "application/json",
             "X-UserType": "USER",
             "X-SourceID": "WEB",
-            "X-ClientLocalIP": "192.168.1.10",
+            "X-ClientLocalIP": _LOCAL_IP,
             "X-ClientPublicIP": self._env.get("ANGEL_PUBLIC_IP") or "106.0.0.1",
-            "X-MACAddress": "00:0a:95:9d:68:16",
+            "X-MACAddress": _MAC_ADDR,
             "X-PrivateKey": self._env["ANGEL_API_KEY"],
         }
         if with_auth and self._jwt:
@@ -207,13 +227,22 @@ class AngelClient:
                 self._jwt = body["data"]["jwtToken"]
                 self._feed_token = body["data"]["feedToken"]
                 try:
-                    SESSION_CACHE.write_text(json.dumps({
-                        "client_id": self._env["ANGEL_CLIENT_ID"],
-                        "jwt": self._jwt,
-                        "feed_token": self._feed_token,
-                        "saved_at": datetime.now(IST_TZ).isoformat(),
-                    }))
+                    import tempfile
+                    import os
+                    fd, tmp_path = tempfile.mkstemp(dir=SESSION_CACHE.parent, prefix="angel_session_tmp_")
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump({
+                            "client_id": self._env["ANGEL_CLIENT_ID"],
+                            "jwt": self._jwt,
+                            "feed_token": self._feed_token,
+                            "saved_at": datetime.now(IST_TZ).isoformat(),
+                        }, f)
+                    os.replace(tmp_path, SESSION_CACHE)
                 except Exception:
+                    try:
+                        os.unlink(tmp_path)
+                    except OSError:
+                        pass
                     pass
                 logger.info("Angel login OK (fresh session)")
                 return
@@ -225,6 +254,9 @@ class AngelClient:
 
     def _relogin(self) -> None:
         with self._auth_lock:
+            # H2-03: Re-check if session became valid while waiting for lock
+            if self._jwt and self._probe_session():
+                return
             self._jwt = self._feed_token = None
             self._login()
 
@@ -243,41 +275,48 @@ class AngelClient:
         with self._token_lock:
             if self._token_map is not None:
                 return self._token_map
-        instruments = None
-        if INSTRUMENTS_CACHE.exists() and time.time() - INSTRUMENTS_CACHE.stat().st_mtime < 20 * 3600:
-            try:
-                instruments = json.loads(INSTRUMENTS_CACHE.read_text(encoding="utf-8"))
-            except Exception:
-                instruments = None
-        if instruments is None:
-            try:
-                r = self._http.get(INSTRUMENTS_URL, timeout=180)
-                r.raise_for_status()
-                instruments = r.json()
+            instruments = None
+            if INSTRUMENTS_CACHE.exists() and time.time() - INSTRUMENTS_CACHE.stat().st_mtime < 20 * 3600:
                 try:
-                    INSTRUMENTS_CACHE.write_text(json.dumps(instruments), encoding="utf-8")
+                    instruments = json.loads(INSTRUMENTS_CACHE.read_text(encoding="utf-8"))
                 except Exception:
-                    pass
-            except Exception as exc:
-                logger.error("Failed to fetch angel instruments master: %s", exc)
-                return {}
-        nse_eq = {}
-        for row in instruments:
-            exch = row.get("exch_seg")
-            sym = str(row.get("symbol", ""))
-            if exch in ("NSE", "BSE"):
-                for suffix in ("-EQ", "-BE", "-SM", "-GSM"):
-                    if sym.endswith(suffix):
-                        nse_eq[sym] = (row, suffix)
-                        break
-        mapping: dict[str, dict] = {}
-        for symbol, (row, suffix) in nse_eq.items():
-            base_sym = symbol[:-len(suffix)]
-            mapping[f"{base_sym}.NS"] = {"token": str(row["token"]), "tradingsymbol": symbol}
-        with self._token_lock:
+                    instruments = None
+            if instruments is None:
+                try:
+                    r = self._http.get(INSTRUMENTS_URL, timeout=180)
+                    r.raise_for_status()
+                    instruments = r.json()
+                    try:
+                        import tempfile
+                        fd, tmp_path = tempfile.mkstemp(dir=INSTRUMENTS_CACHE.parent, prefix="angel_instruments_tmp_")
+                        with os.fdopen(fd, "w", encoding="utf-8") as f:
+                            json.dump(instruments, f)
+                        os.replace(tmp_path, INSTRUMENTS_CACHE)
+                    except Exception:
+                        try:
+                            os.unlink(tmp_path)
+                        except Exception:
+                            pass
+                        pass
+                except Exception as exc:
+                    logger.error("Failed to fetch angel instruments master: %s", exc)
+                    return {}
+            nse_eq = {}
+            for row in instruments:
+                exch = row.get("exch_seg")
+                sym = str(row.get("symbol", ""))
+                if exch in ("NSE", "BSE"):
+                    for suffix in ("-EQ", "-BE", "-SM", "-GSM"):
+                        if sym.endswith(suffix):
+                            nse_eq[sym] = (row, suffix)
+                            break
+            mapping: dict[str, dict] = {}
+            for symbol, (row, suffix) in nse_eq.items():
+                base_sym = symbol[:-len(suffix)]
+                mapping[f"{base_sym}.NS"] = {"token": str(row["token"]), "tradingsymbol": symbol}
             self._token_map = mapping
-        logger.info("Angel instrument map ready: %s NSE/BSE equities", len(mapping))
-        return mapping
+            logger.info("Angel instrument map ready: %s NSE/BSE equities", len(mapping))
+            return mapping
 
     def resolve(self, yahoo_symbols: list[str]) -> tuple[dict[str, dict], list[str]]:
         mapping = self.token_map()
@@ -310,6 +349,11 @@ class AngelClient:
                 except ValueError:
                     return {}
             except requests.exceptions.RequestException as exc:
+                if isinstance(exc, requests.exceptions.ReadTimeout):
+                    if "/placeOrder" in path or "/cancelOrder" in path:
+                        # C2-03: Do not retry order placement/cancellation on ReadTimeout
+                        logger.warning("Order API ReadTimeout on %s, raising to avoid duplicate orders: %s", path, exc)
+                        raise
                 if attempt == 2:
                     logger.warning("_secure_post network error %s: %s", path, exc)
                     return {}
@@ -464,8 +508,20 @@ class AngelClient:
         if not token_info:
             raise RuntimeError(f"Cannot place bracket order: symbol token not found for {symbol}")
 
-        stop_dist = abs(entry_price - stop_loss)
-        target_dist = abs(take_profit - entry_price)
+        if entry_price > 0:
+            stop_dist = abs(entry_price - stop_loss)
+            target_dist = abs(take_profit - entry_price)
+        else:
+            quotes = self.get_quotes_full([token_info["token"]])
+            if token_info["token"] in quotes:
+                ltp = float(quotes[token_info["token"]].get("lastTradedPrice", 0.0))
+                if ltp > 0:
+                    stop_dist = abs(ltp - stop_loss)
+                    target_dist = abs(take_profit - ltp)
+                else:
+                    raise RuntimeError(f"Failed to resolve LTP for market bracket order on {symbol}")
+            else:
+                raise RuntimeError(f"Failed to fetch quote for market bracket order on {symbol}")
 
         payload = {
             "variety": "ROBO",

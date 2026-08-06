@@ -4,9 +4,9 @@ version = "0.1.0"
 description = "Add your description here"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi>=0.139.1",
-    "numpy>=2.5.1",
-    "pandas>=3.0.3",
-    "uvicorn[standard]>=0.51.0",
-    "yfinance>=1.5.1",
+    "fastapi>=0.115.0",
+    "numpy>=1.26.0",
+    "pandas>=2.2.0",
+    "uvicorn[standard]>=0.32.0",
+    "yfinance>=0.2.54",
 ]

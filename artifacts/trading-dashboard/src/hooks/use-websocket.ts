@@ -7,9 +7,18 @@ function fmtPrice(p: number | null | undefined): string {
   return p.toFixed(2);
 }
 
+// Lazy global AudioContext to prevent exceeding browser limits
+let audioCtx: AudioContext | null = null;
+
 function playBeep() {
   try {
-    const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') {
+      audioCtx.resume();
+    }
+    const ctx = audioCtx;
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
     
@@ -37,6 +46,7 @@ export function useWebSocket() {
   useEffect(() => {
     let ws: WebSocket | null = null;
     let reconnectTimeout: ReturnType<typeof setTimeout>;
+    let heartbeatInterval: ReturnType<typeof setInterval>;
     let dead = false;
 
     const connect = () => {
@@ -49,6 +59,14 @@ export function useWebSocket() {
 
       ws.onopen = () => {
         reconnectDelay.current = 1000; // reset on success
+        queryClient.invalidateQueries(); // fetch missed data on reconnect
+        
+        // Start heartbeat
+        heartbeatInterval = setInterval(() => {
+          if (ws?.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "ping" }));
+          }
+        }, 25000); // 25 seconds
       };
 
       ws.onmessage = (event) => {
@@ -168,7 +186,10 @@ export function useWebSocket() {
         } catch { /* ignore parse errors */ }
       };
 
-      ws.onclose = () => scheduleReconnect();
+      ws.onclose = () => {
+        clearInterval(heartbeatInterval);
+        scheduleReconnect();
+      };
       ws.onerror = () => { ws?.close(); };
     };
 
@@ -186,6 +207,7 @@ export function useWebSocket() {
     return () => {
       dead = true;
       clearTimeout(reconnectTimeout);
+      clearInterval(heartbeatInterval);
       if (ws) { ws.onclose = null; ws.close(); }
     };
   }, [queryClient]);

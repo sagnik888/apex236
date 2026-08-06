@@ -1,9 +1,9 @@
-import { useState, useMemo, useEffect } from "react";
-import { useGetSignals, useGetScannerStats, useTriggerScan } from "@workspace/api-client-react";
+import React, { useState, useMemo, useEffect, memo } from "react";
+import { useGetSignals, useGetScannerStats, useTriggerScan, customFetch } from "@workspace/api-client-react";
 import type { Signal } from "@workspace/api-client-react";
 import { useLocation, Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown, Sliders, Zap } from "lucide-react";
+import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown, Sliders, Zap, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 type SortKey = "score" | "close" | "rsi" | "adx" | "pnl_pct" | "daily_move_pct" | "eta_hrs" | "signal_time";
@@ -144,6 +144,230 @@ function formatSignalTime(ts: string | unknown): string {
   }
 }
 
+const SignalRow = memo(({ row, setLocation, appSettings }: any) => {
+  const iSwing = (row.intraday_or_swing as string) === "Swing";
+  const dailyMove = row.daily_move_pct as number | null | undefined;
+  const etaHrs = row.eta_hrs as number | null | undefined;
+
+  const moodInfo = getRegimeMoodInfo(row);
+
+  return (
+    <tr
+      className={`transition-colors cursor-pointer group ${moodInfo.rowClass} ${moodInfo.borderClass}`}
+      onClick={() => setLocation(`/chart/${encodeURIComponent(row.symbol)}/${row.timeframe}`)}
+    >
+      {/* Symbol */}
+      <td className="px-4 py-2.5">
+        <div className="flex flex-col gap-0.5">
+          {/* Row 1: STOCK NAME % SECTOR */}
+          <span className="flex items-center gap-1.5 font-bold font-mono">
+            {row.symbol}
+            {(row as any).transition === "BTST" && (
+              <span className="bg-yellow-500/20 text-yellow-500 text-[9px] font-bold px-1 rounded uppercase tracking-wider">BTST</span>
+            )}
+            <span className="text-muted-foreground text-[10px] font-normal">%</span>
+            <span className="text-muted-foreground text-[10px] font-normal tracking-wide">{(row as any).sector || "NSE"}</span>
+          </span>
+          {/* Row 2: Option contract details (CE/PE + Strike + Premium) */}
+          <div className="flex items-center gap-1.5 text-[9px] font-normal tracking-wide">
+            {!iSwing && appSettings?.enable_options !== false && (
+              <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-extrabold text-amber-400 border border-amber-500/30 tracking-wider" title="Intraday ATM option contract auto-routed via Upstox API v2 / AngelOne">
+                <Zap className="h-2.5 w-2.5 fill-amber-400 flex-shrink-0" />
+                <span>{(row as any).option_type || (row.direction === "BUY" ? "CE" : "PE")}</span>
+                {(row as any).option_strike && <span className="font-mono text-amber-300">₹{(row as any).option_strike}</span>}
+                {(row as any).option_entry && <span className="font-mono text-signal-buy text-[8.5px]">(₹{(row as any).option_entry.toFixed(1)})</span>}
+              </span>
+            )}
+            {(row as any).relative_volume && (row as any).relative_volume > 1.5 && (
+              <span className="text-orange-400 font-medium whitespace-nowrap">🔥 {(row as any).relative_volume.toFixed(1)}x Vol</span>
+            )}
+          </div>
+        </div>
+      </td>
+
+      {/* TF + Intraday/Swing */}
+      <td className="px-4 py-2.5">
+        <div className="flex flex-col gap-0.5">
+          <span className="font-mono text-xs text-muted-foreground">{row.timeframe}</span>
+          <span className={`text-[9px] font-bold uppercase tracking-wider ${iSwing ? "text-purple-400" : "text-cyan-400"}`}>
+            {iSwing ? "Swing" : "Intra"}
+          </span>
+        </div>
+      </td>
+
+      {/* Direction */}
+      <td className="px-4 py-2.5">
+        <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold tracking-widest ${
+          row.direction === "BUY"
+            ? "bg-signal-buy/20 text-signal-buy border border-signal-buy/30"
+            : "bg-signal-sell/20 text-signal-sell border border-signal-sell/30"
+        }`}>
+          {row.direction === "BUY"  && <ArrowUpRight className="h-3 w-3" />}
+          {row.direction === "SELL" && <ArrowDownRight className="h-3 w-3" />}
+          {row.direction}
+        </div>
+      </td>
+
+      {/* Score & Bias */}
+      <td className="px-4 py-2.5">
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono text-xs w-7 tabular-nums">{row.score.toFixed(0)}</span>
+            <div className="w-14 h-1.5 bg-muted rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full ${
+                  row.score >= 70 ? "bg-signal-buy" :
+                  row.score >= 50 ? "bg-yellow-500" : "bg-signal-sell"
+                }`}
+                style={{ width: `${Math.min(row.score, 100)}%` }}
+              />
+            </div>
+          </div>
+          <span className={`text-[9px] uppercase font-bold tracking-wider ${
+            row.bias?.includes("BULL") ? "text-signal-buy" :
+            row.bias?.includes("BEAR") ? "text-signal-sell" : "text-muted-foreground"
+          }`}>
+            {row.bias || "—"}
+          </span>
+        </div>
+      </td>
+
+      {/* CMP */}
+      <td className="px-4 py-2.5 font-mono text-right font-medium tabular-nums">
+        {row.close.toFixed(2)}
+      </td>
+
+      {/* Entry (Time) */}
+      <td className="px-4 py-2.5 text-right flex flex-col items-end gap-0.5">
+        <span className="font-mono text-xs tabular-nums text-foreground">
+          {row.entry_price != null && Number(row.entry_price) > 0 ? Number(row.entry_price).toFixed(2) : "—"}
+        </span>
+        <span className="font-mono text-[10px] text-muted-foreground">
+          {formatSignalTime(row.signal_time)}
+        </span>
+      </td>
+
+      {/* SL1 */}
+      <td className="px-4 py-2.5 font-mono text-xs text-signal-sell/80 tabular-nums">
+        <div className="flex flex-col gap-0.5">
+          <span>{row.sl1 != null ? row.sl1.toFixed(2) : "—"}</span>
+          {(row as any).sl_distance_pct != null && (
+            <span className="text-[10px] text-red-400/80">(-{(row as any).sl_distance_pct.toFixed(1)}%)</span>
+          )}
+        </div>
+      </td>
+
+      {/* TP1 */}
+      <td className="px-4 py-2.5 font-mono text-xs text-signal-buy/80 tabular-nums">
+        {row.tp1 != null ? row.tp1.toFixed(2) : "—"}
+      </td>
+
+      {/* TP2 */}
+      <td className="px-4 py-2.5 font-mono text-xs text-signal-buy/60 tabular-nums">
+        {row.tp2 != null ? row.tp2.toFixed(2) : "—"}
+      </td>
+
+      {/* Day Change */}
+      <td className="px-4 py-2.5 font-mono text-right text-xs tabular-nums">
+        {dailyMove != null ? (
+          <span className={dailyMove > 0 ? "text-signal-buy" : dailyMove < 0 ? "text-signal-sell" : "text-muted-foreground"}>
+            {dailyMove > 0 ? "+" : ""}{dailyMove.toFixed(2)}%
+          </span>
+        ) : <span className="text-muted-foreground">—</span>}
+      </td>
+
+      {/* Regime MTF */}
+      <td className="px-4 py-2.5">
+        <div className="flex flex-col gap-1 items-start">
+          <div className="flex gap-1 items-center pb-[1px]">
+            <RegimeBox value={row.regime_15m as string} label="15m" activeStatus={(row.active_timeframes as Record<string, string>)?.[`15m`]} />
+            <RegimeBox value={row.regime_1h as string} label="1h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1h`]} />
+            <RegimeBox value={row.regime_4h as string} label="4h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`4h`]} />
+            <RegimeBox value={row.regime_1d as string} label="1d" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1d`]} />
+          </div>
+          <span className={`text-[9px] px-1.5 py-0.5 rounded border uppercase tracking-wider font-bold ${moodInfo.badgeClass}`}>
+            {moodInfo.label}
+          </span>
+        </div>
+      </td>
+
+      {/* Setup */}
+      <td className="px-4 py-2.5">
+        <div className="flex flex-col gap-0.5 items-start">
+          <span className="px-1.5 py-0.5 bg-accent text-accent-foreground text-[10px] font-mono rounded whitespace-nowrap">
+            {row.setup || "—"}
+          </span>
+          {(row as any).win_rate_pct != null && (
+            <span className="text-[9px] text-muted-foreground font-semibold">{(row as any).win_rate_pct.toFixed(0)}% WR</span>
+          )}
+        </div>
+      </td>
+
+      {/* RSI */}
+      <td className="px-4 py-2.5 font-mono text-xs text-right tabular-nums">
+        {row.rsi != null ? (
+          <div className="flex items-center justify-end gap-1.5">
+            {row.rsi > 70 && <span className="px-1 py-0.5 bg-signal-sell/20 text-signal-sell border border-signal-sell/40 rounded text-[9px] font-bold uppercase">OB</span>}
+            {row.rsi < 30 && <span className="px-1 py-0.5 bg-signal-buy/20 text-signal-buy border border-signal-buy/40 rounded text-[9px] font-bold uppercase">OS</span>}
+            <span className={`px-2 py-0.5 rounded border font-semibold ${moodInfo.badgeClass}`}>
+              {row.rsi.toFixed(1)}
+            </span>
+          </div>
+        ) : <span className="text-muted-foreground">—</span>}
+      </td>
+
+      {/* ADX */}
+      <td className="px-4 py-2.5 font-mono text-xs text-right tabular-nums">
+        {row.adx != null ? (
+          <div className="flex items-center justify-end gap-1.5">
+            {row.adx >= 25 && <span className="px-1 py-0.5 bg-foreground/10 text-foreground text-[9px] font-bold rounded uppercase">STR</span>}
+            <span className={`px-2 py-0.5 rounded border font-semibold ${moodInfo.badgeClass}`}>
+              {row.adx.toFixed(1)}
+            </span>
+          </div>
+        ) : <span className="text-muted-foreground">—</span>}
+      </td>
+
+      {/* State */}
+      <td className="px-4 py-2.5">
+        <div className="flex items-center gap-1.5">
+          <div className={`h-2 w-2 rounded-full flex-shrink-0 ${
+            row.state === "ACTIVE"  ? "bg-signal-buy shadow-[0_0_6px_var(--color-signal-buy)] animate-pulse" :
+            row.state === "PENDING" ? "bg-yellow-500" : "bg-muted-foreground"
+          }`} />
+          <span className="text-xs font-semibold text-muted-foreground tracking-wider">
+            {row.state}
+          </span>
+        </div>
+      </td>
+
+      {/* P&L */}
+      <td className="px-4 py-2.5 text-right font-mono text-xs font-medium tabular-nums">
+        {row.state === "ACTIVE" && (row as any).live_pnl_pct != null ? (
+          <div className="flex flex-col items-end">
+            <span className={(row as any).live_pnl_pct > 0 ? "text-signal-buy" : (row as any).live_pnl_pct < 0 ? "text-signal-sell" : "text-muted-foreground"}>
+              {(row as any).live_pnl_abs > 0 ? "+" : ""}{(row as any).live_pnl_abs?.toFixed(2)} ({(row as any).live_pnl_pct > 0 ? "+" : ""}{(row as any).live_pnl_pct?.toFixed(2)}%)
+            </span>
+          </div>
+        ) : row.state === "FLAT" && row.pnl_pct != null ? (
+          <span className={row.pnl_pct > 0 ? "text-signal-buy" : row.pnl_pct < 0 ? "text-signal-sell" : "text-muted-foreground"}>
+            {row.pnl_pct > 0 ? "+" : ""}{row.pnl_pct.toFixed(2)}%
+          </span>
+        ) : <span className="text-muted-foreground">—</span>}
+      </td>
+
+      {/* ETA */}
+      <td className="px-4 py-2.5 text-right font-mono text-xs text-muted-foreground tabular-nums">
+        {etaHrs != null ? (
+          <span className={etaHrs < 0 ? "text-signal-sell" : etaHrs < 2 ? "text-yellow-400" : ""}>
+            {etaHrs > 0 ? `${etaHrs.toFixed(0)}h` : `+${Math.abs(etaHrs).toFixed(0)}h OD`}
+          </span>
+        ) : <span>—</span>}
+      </td>
+    </tr>
+  );
+});
+
 export default function Dashboard() {
   const [timeframe, setTimeframe] = useState<string>(() => localStorage.getItem("apex_timeframe") || "ALL");
   const [filter, setFilter] = useState<string>(() => localStorage.getItem("apex_filter") || "ALL");
@@ -172,25 +396,17 @@ export default function Dashboard() {
 
   const { data: brokerStatus } = useQuery({
     queryKey: ["/api/brokers/status"],
-    queryFn: async () => {
-      const r = await fetch("/api/brokers/status");
-      if (!r.ok) throw new Error("Failed broker status");
-      return r.json();
-    },
+    queryFn: () => customFetch<any>("/api/brokers/status"),
     refetchInterval: 10000,
   });
 
   const { data: appSettings } = useQuery({
     queryKey: ["/api/settings"],
-    queryFn: async () => {
-      const r = await fetch("/api/settings");
-      if (!r.ok) throw new Error("Failed settings");
-      return r.json();
-    },
+    queryFn: () => customFetch<any>("/api/settings"),
     refetchInterval: 10000,
   });
 
-  const { data: signalsData, isLoading } = useGetSignals(
+  const { data: signalsData, isLoading, isError } = useGetSignals(
     {
       timeframe: timeframe === "ALL" ? undefined : timeframe,
       direction: filter === "ALL" ? undefined : filter,
@@ -225,7 +441,7 @@ export default function Dashboard() {
         if (tradeTypeFilter === "INTRADAY") {
           return type === "Intraday" && transition !== "BTST";
         } else if (tradeTypeFilter === "SWING") {
-          return type !== "Intraday"; // Swing, BTST, STBT
+          return type !== "Intraday" || transition === "BTST"; // Swing, STBT, BTST
         } else if (tradeTypeFilter === "BTST") {
           return transition === "BTST";
         }
@@ -239,8 +455,8 @@ export default function Dashboard() {
         const bv = (b.signal_time as string) || "";
         return sortDir === "asc" ? av.localeCompare(bv) : bv.localeCompare(av);
       }
-      let av = a[sortKey] as number | null | undefined;
-      let bv = b[sortKey] as number | null | undefined;
+      let av = sortKey === "pnl_pct" ? ((a as any).live_pnl_pct ?? a.pnl_pct) : a[sortKey] as number | null | undefined;
+      let bv = sortKey === "pnl_pct" ? ((b as any).live_pnl_pct ?? b.pnl_pct) : b[sortKey] as number | null | undefined;
       av = av ?? (sortDir === "asc" ? Infinity : -Infinity);
       bv = bv ?? (sortDir === "asc" ? Infinity : -Infinity);
       return sortDir === "asc" ? av - bv : bv - av;
@@ -421,7 +637,17 @@ export default function Dashboard() {
 
       {/* Table */}
       <div className="flex-1 overflow-auto p-4">
-        {isLoading && !signalsData ? (
+        {isError ? (
+          <div className="h-full flex flex-col items-center justify-center text-destructive bg-destructive/5 rounded-lg border border-destructive/20">
+            <AlertTriangle className="h-8 w-8 mb-4" />
+            <p className="font-mono text-sm font-bold">Error loading signals</p>
+            <p className="text-xs opacity-70 mt-1 mb-4">Cannot connect to the backend server.</p>
+            <Button variant="outline" size="sm" onClick={() => window.location.reload()} className="border-destructive/30 hover:bg-destructive/10">
+              <RefreshCw className="mr-2 h-3 w-3" />
+              Retry Connection
+            </Button>
+          </div>
+        ) : isLoading && !signalsData ? (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground">
             <Activity className="h-8 w-8 animate-pulse text-primary mb-4" />
             <p className="font-mono text-sm">Initial scan in progress...</p>
@@ -439,7 +665,7 @@ export default function Dashboard() {
           <div className="min-w-[121.5rem] rounded-md border border-border bg-card">
             <table className="w-full table-fixed text-sm text-left">
               <colgroup>
-                <col className="w-[9.625rem]" />
+                <col className="w-[12rem]" />
                 <col className="w-[5.5rem]" />
                 <col className="w-[5.5rem]" />
                 <col className="w-[6.875rem]" />
@@ -479,227 +705,14 @@ export default function Dashboard() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-border">
-                {signals.map((row: Signal & Record<string, unknown>, i) => {
-                  const iSwing = (row.intraday_or_swing as string) === "Swing";
-                  const dailyMove = row.daily_move_pct as number | null | undefined;
-                  const etaHrs = row.eta_hrs as number | null | undefined;
-
-                  const moodInfo = getRegimeMoodInfo(row);
-
-                  return (
-                    <tr
-                      key={`${row.symbol}-${row.timeframe}-${i}`}
-                      className={`transition-colors cursor-pointer group ${moodInfo.rowClass} ${moodInfo.borderClass}`}
-                      onClick={() => setLocation(`/chart/${row.symbol}/${row.timeframe}`)}
-                    >
-                      {/* Symbol */}
-                      <td className="px-4 py-2.5">
-                        <div className="flex flex-col gap-0.5">
-                          <span className="flex items-center gap-1.5 font-bold font-mono">
-                            {row.symbol}
-                            {(row as any).transition === "BTST" && (
-                              <span className="bg-yellow-500/20 text-yellow-500 text-[9px] font-bold px-1 rounded uppercase tracking-wider">BTST</span>
-                            )}
-                            {!iSwing && appSettings?.enable_options !== false && (
-                              <span className="inline-flex items-center gap-1 rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-extrabold text-amber-400 border border-amber-500/30 tracking-wider" title="Intraday ATM option contract auto-routed via Upstox API v2 / AngelOne">
-                                <Zap className="h-2.5 w-2.5 fill-amber-400 flex-shrink-0" />
-                                <span>{(row as any).option_type || (row.direction === "BUY" ? "CE" : "PE")}</span>
-                                {(row as any).option_strike && <span className="font-mono text-amber-300">₹{(row as any).option_strike}</span>}
-                                {(row as any).option_entry && <span className="font-mono text-signal-buy text-[8.5px]">(₹{(row as any).option_entry.toFixed(1)})</span>}
-                              </span>
-                            )}
-                          </span>
-                          <div className="flex items-center gap-1.5 text-[9px] font-normal tracking-wide">
-                            <span className="text-muted-foreground">{(row as any).sector || "NSE"}</span>
-                            {(row as any).relative_volume && (row as any).relative_volume > 1.5 && (
-                              <span className="text-orange-400 font-medium whitespace-nowrap">🔥 {(row as any).relative_volume.toFixed(1)}x Vol</span>
-                            )}
-                          </div>
-                        </div>
-                      </td>
-
-                      {/* TF + Intraday/Swing */}
-                      <td className="px-4 py-2.5">
-                        <div className="flex flex-col gap-0.5">
-                          <span className="font-mono text-xs text-muted-foreground">{row.timeframe}</span>
-                          <span className={`text-[9px] font-bold uppercase tracking-wider ${iSwing ? "text-purple-400" : "text-cyan-400"}`}>
-                            {iSwing ? "Swing" : "Intra"}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* Direction */}
-                      <td className="px-4 py-2.5">
-                        <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold tracking-widest ${
-                          row.direction === "BUY"
-                            ? "bg-signal-buy/20 text-signal-buy border border-signal-buy/30"
-                            : "bg-signal-sell/20 text-signal-sell border border-signal-sell/30"
-                        }`}>
-                          {row.direction === "BUY"  && <ArrowUpRight className="h-3 w-3" />}
-                          {row.direction === "SELL" && <ArrowDownRight className="h-3 w-3" />}
-                          {row.direction}
-                        </div>
-                      </td>
-
-                      {/* Score & Bias */}
-                      <td className="px-4 py-2.5">
-                        <div className="flex flex-col gap-1">
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono text-xs w-7 tabular-nums">{row.score.toFixed(0)}</span>
-                            <div className="w-14 h-1.5 bg-muted rounded-full overflow-hidden">
-                              <div
-                                className={`h-full rounded-full ${
-                                  row.score >= 70 ? "bg-signal-buy" :
-                                  row.score >= 50 ? "bg-yellow-500" : "bg-signal-sell"
-                                }`}
-                                style={{ width: `${Math.min(row.score, 100)}%` }}
-                              />
-                            </div>
-                          </div>
-                          <span className={`text-[9px] uppercase font-bold tracking-wider ${
-                            row.bias?.includes("BULL") ? "text-signal-buy" :
-                            row.bias?.includes("BEAR") ? "text-signal-sell" : "text-muted-foreground"
-                          }`}>
-                            {row.bias || "—"}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* CMP */}
-                      <td className="px-4 py-2.5 font-mono text-right font-medium tabular-nums">
-                        {row.close.toFixed(2)}
-                      </td>
-
-                      {/* Entry (Time) */}
-                      <td className="px-4 py-2.5 text-right flex flex-col items-end gap-0.5">
-                        <span className="font-mono text-xs tabular-nums text-foreground">
-                          {row.entry_price != null && Number(row.entry_price) > 0 ? Number(row.entry_price).toFixed(2) : "—"}
-                        </span>
-                        <span className="font-mono text-[10px] text-muted-foreground">
-                          {formatSignalTime(row.signal_time)}
-                        </span>
-                      </td>
-
-                      {/* SL1 */}
-                      <td className="px-4 py-2.5 font-mono text-xs text-signal-sell/80 tabular-nums">
-                        <div className="flex flex-col gap-0.5">
-                          <span>{row.sl1 != null ? row.sl1.toFixed(2) : "—"}</span>
-                          {(row as any).sl_distance_pct != null && (
-                            <span className="text-[10px] text-red-400/80">(-{(row as any).sl_distance_pct.toFixed(1)}%)</span>
-                          )}
-                        </div>
-                      </td>
-
-                      {/* TP1 */}
-                      <td className="px-4 py-2.5 font-mono text-xs text-signal-buy/80 tabular-nums">
-                        {row.tp1 != null ? row.tp1.toFixed(2) : "—"}
-                      </td>
-
-                      {/* TP2 */}
-                      <td className="px-4 py-2.5 font-mono text-xs text-signal-buy/60 tabular-nums">
-                        {row.tp2 != null ? row.tp2.toFixed(2) : "—"}
-                      </td>
-
-                      {/* Day Change */}
-                      <td className="px-4 py-2.5 font-mono text-right text-xs tabular-nums">
-                        {dailyMove != null ? (
-                          <span className={dailyMove > 0 ? "text-signal-buy" : dailyMove < 0 ? "text-signal-sell" : "text-muted-foreground"}>
-                            {dailyMove > 0 ? "+" : ""}{dailyMove.toFixed(2)}%
-                          </span>
-                        ) : <span className="text-muted-foreground">—</span>}
-                      </td>
-
-                      {/* Regime MTF */}
-                      <td className="px-4 py-2.5">
-                        <div className="flex flex-col gap-1 items-start">
-                          <div className="flex gap-1 items-center pb-[1px]">
-                            <RegimeBox value={row.regime_15m as string} label="15m" activeStatus={(row.active_timeframes as Record<string, string>)?.[`15m`]} />
-                            <RegimeBox value={row.regime_1h as string} label="1h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1h`]} />
-                            <RegimeBox value={row.regime_4h as string} label="4h" activeStatus={(row.active_timeframes as Record<string, string>)?.[`4h`]} />
-                            <RegimeBox value={row.regime_1d as string} label="1d" activeStatus={(row.active_timeframes as Record<string, string>)?.[`1d`]} />
-                          </div>
-                          <span className={`text-[9px] px-1.5 py-0.5 rounded border uppercase tracking-wider font-bold ${moodInfo.badgeClass}`}>
-                            {moodInfo.label}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* Setup */}
-                      <td className="px-4 py-2.5">
-                        <div className="flex flex-col gap-0.5 items-start">
-                          <span className="px-1.5 py-0.5 bg-accent text-accent-foreground text-[10px] font-mono rounded whitespace-nowrap">
-                            {row.setup || "—"}
-                          </span>
-                          {(row as any).win_rate_pct != null && (
-                            <span className="text-[9px] text-muted-foreground font-semibold">{(row as any).win_rate_pct.toFixed(0)}% WR</span>
-                          )}
-                        </div>
-                      </td>
-
-                      {/* RSI */}
-                      <td className="px-4 py-2.5 font-mono text-xs text-right tabular-nums">
-                        {row.rsi != null ? (
-                          <div className="flex items-center justify-end gap-1.5">
-                            {row.rsi > 70 && <span className="px-1 py-0.5 bg-signal-sell/20 text-signal-sell border border-signal-sell/40 rounded text-[9px] font-bold uppercase">OB</span>}
-                            {row.rsi < 30 && <span className="px-1 py-0.5 bg-signal-buy/20 text-signal-buy border border-signal-buy/40 rounded text-[9px] font-bold uppercase">OS</span>}
-                            <span className={`px-2 py-0.5 rounded border font-semibold ${moodInfo.badgeClass}`}>
-                              {row.rsi.toFixed(1)}
-                            </span>
-                          </div>
-                        ) : <span className="text-muted-foreground">—</span>}
-                      </td>
-
-                      {/* ADX */}
-                      <td className="px-4 py-2.5 font-mono text-xs text-right tabular-nums">
-                        {row.adx != null ? (
-                          <div className="flex items-center justify-end gap-1.5">
-                            {row.adx >= 25 && <span className="px-1 py-0.5 bg-foreground/10 text-foreground text-[9px] font-bold rounded uppercase">STR</span>}
-                            <span className={`px-2 py-0.5 rounded border font-semibold ${moodInfo.badgeClass}`}>
-                              {row.adx.toFixed(1)}
-                            </span>
-                          </div>
-                        ) : <span className="text-muted-foreground">—</span>}
-                      </td>
-
-                      {/* State */}
-                      <td className="px-4 py-2.5">
-                        <div className="flex items-center gap-1.5">
-                          <div className={`h-2 w-2 rounded-full flex-shrink-0 ${
-                            row.state === "ACTIVE"  ? "bg-signal-buy shadow-[0_0_6px_var(--color-signal-buy)] animate-pulse" :
-                            row.state === "PENDING" ? "bg-yellow-500" : "bg-muted-foreground"
-                          }`} />
-                          <span className="text-xs font-semibold text-muted-foreground tracking-wider">
-                            {row.state}
-                          </span>
-                        </div>
-                      </td>
-
-                      {/* P&L */}
-                      <td className="px-4 py-2.5 text-right font-mono text-xs font-medium tabular-nums">
-                        {row.state === "ACTIVE" && (row as any).live_pnl_pct != null ? (
-                          <div className="flex flex-col items-end">
-                            <span className={(row as any).live_pnl_pct > 0 ? "text-signal-buy" : (row as any).live_pnl_pct < 0 ? "text-signal-sell" : "text-muted-foreground"}>
-                              {(row as any).live_pnl_abs > 0 ? "+" : ""}{(row as any).live_pnl_abs?.toFixed(2)} ({(row as any).live_pnl_pct > 0 ? "+" : ""}{(row as any).live_pnl_pct?.toFixed(2)}%)
-                            </span>
-                          </div>
-                        ) : row.state === "FLAT" && row.pnl_pct != null ? (
-                          <span className={row.pnl_pct > 0 ? "text-signal-buy" : row.pnl_pct < 0 ? "text-signal-sell" : "text-muted-foreground"}>
-                            {row.pnl_pct > 0 ? "+" : ""}{row.pnl_pct.toFixed(2)}%
-                          </span>
-                        ) : <span className="text-muted-foreground">—</span>}
-                      </td>
-
-                      {/* ETA */}
-                      <td className="px-4 py-2.5 text-right font-mono text-xs text-muted-foreground tabular-nums">
-                        {etaHrs != null ? (
-                          <span className={etaHrs < 0 ? "text-signal-sell" : etaHrs < 2 ? "text-yellow-400" : ""}>
-                            {etaHrs > 0 ? `${etaHrs.toFixed(0)}h` : `+${Math.abs(etaHrs).toFixed(0)}h OD`}
-                          </span>
-                        ) : <span>—</span>}
-                      </td>
-                    </tr>
-                  );
-                })}
+                {signals.map((row: Signal & Record<string, unknown>) => (
+                  <SignalRow 
+                    key={`${row.symbol}-${row.timeframe}`} 
+                    row={row} 
+                    setLocation={setLocation} 
+                    appSettings={appSettings} 
+                  />
+                ))}
               </tbody>
             </table>
           </div>

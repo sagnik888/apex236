@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 import numpy as np
+from scipy.stats import rankdata
 
 
 # ---------------------------------------------------------------------------
@@ -91,8 +92,8 @@ def rank_ic(pred: np.ndarray, actual: np.ndarray) -> float:
     """Spearman rank correlation between prediction and realised outcome."""
     if len(pred) < 3:
         return 0.0
-    pr = np.argsort(np.argsort(pred)).astype(float)
-    ar = np.argsort(np.argsort(actual)).astype(float)
+    pr = rankdata(pred)
+    ar = rankdata(actual)
     pr -= pr.mean(); ar -= ar.mean()
     denom = np.sqrt((pr @ pr) * (ar @ ar))
     return float(pr @ ar / denom) if denom > 0 else 0.0
@@ -104,7 +105,7 @@ def auc(pred: np.ndarray, label: np.ndarray) -> float:
     n_pos, n_neg = int(pos.sum()), int(neg.sum())
     if n_pos == 0 or n_neg == 0:
         return 0.5
-    ranks = np.argsort(np.argsort(pred)).astype(float) + 1.0
+    ranks = rankdata(pred)
     return float((ranks[pos].sum() - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
 
 

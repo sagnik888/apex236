@@ -99,19 +99,20 @@ export function SystemHealthPanel({ stats, isOffline, responseUpdatedAt, nextSca
     refetchInterval: 10000,
   });
 
-  const brokerLabel = !brokerStatus
+  const d = brokerStatus?.dispatcher;
+  const brokerLabel = !d
     ? "BROKER —"
-    : brokerStatus.angel_available && brokerStatus.upstox_available
+    : d.angel_available && d.upstox_available
       ? "UPSTOX+ANGEL (50/50)"
-      : brokerStatus.upstox_available
+      : d.upstox_available
         ? "UPSTOX ONLY"
-        : brokerStatus.angel_available
+        : d.angel_available
           ? "ANGEL ONLY"
           : "BROKERS OFFLINE";
 
-  const brokerColor = !brokerStatus || (!brokerStatus.angel_available && !brokerStatus.upstox_available)
+  const brokerColor = !d || (!d.angel_available && !d.upstox_available)
     ? "border-signal-sell/30 bg-signal-sell/[0.08] text-signal-sell"
-    : brokerStatus.angel_available && brokerStatus.upstox_available
+    : d.angel_available && d.upstox_available
       ? "border-blue-500/30 bg-blue-500/[0.08] text-blue-400"
       : "border-yellow-500/30 bg-yellow-500/[0.08] text-yellow-400";
 

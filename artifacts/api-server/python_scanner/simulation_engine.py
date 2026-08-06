@@ -46,7 +46,7 @@ def simulate(
     cost_pct: float = DEFAULT_ROUND_TRIP_COST_PCT,
     slippage_pct: float = DEFAULT_SLIPPAGE_PCT,
     entry_delay_bars: int = 1,
-    deduct_costs: bool = False,
+    deduct_costs: bool = True,
 ) -> Optional[Tuple[float, int]]:
     """Simulate a trade fill with stop-loss and take-profit targets.
 
@@ -65,6 +65,8 @@ def simulate(
     Returns:
         (return_pct, holding_bars) or None if entry is out of bounds or invalid.
     """
+    if max_bars <= 0:
+        return None
     exec_idx = entry_idx + entry_delay_bars
     if exec_idx >= len(o):
         return None
@@ -86,25 +88,22 @@ def simulate(
         low_val = float(l[i])
         open_val = float(o[i])
 
-        # If execution bar open already gaps beyond stop
-        if i == exec_idx:
-            if is_long and open_val <= sl:
-                ret = (open_val * (1.0 - slippage_pct / 100.0) - entry) / entry * 100.0
-                return (ret - cost_pct if deduct_costs else ret), 0
-            if not is_long and open_val >= sl:
-                ret = (entry - open_val * (1.0 + slippage_pct / 100.0)) / entry * 100.0
-                return (ret - cost_pct if deduct_costs else ret), 0
-
+        # Gap-through checks for all bars (C-03)
         if is_long:
+            if open_val <= sl:
+                ret = (open_val * (1.0 - slippage_pct / 100.0) - entry) / entry * 100.0
+                return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
+            if open_val >= tp:
+                ret = (open_val - entry) / entry * 100.0
+                return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
+                
             hit_sl = low_val <= sl
             hit_tp = high_val >= tp
             if hit_sl and hit_tp:
-                # Same-bar touch resolution: check where open is relative to mid
-                if open_val < entry:
-                    # Opened lower -> touched SL first conservatively
-                    ret = (sl * (1.0 - slippage_pct / 100.0) - entry) / entry * 100.0
-                else:
-                    ret = (tp - entry) / entry * 100.0
+                # Same-bar ambiguity: intrabar order is unknown, so resolve
+                # conservatively to the STOP (matches _stop_fill and the live
+                # run_symbol engine). Booking the TP here inflated backtest WR.
+                ret = (sl * (1.0 - slippage_pct / 100.0) - entry) / entry * 100.0
                 return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
             elif hit_sl:
                 ret = (sl * (1.0 - slippage_pct / 100.0) - entry) / entry * 100.0
@@ -113,13 +112,18 @@ def simulate(
                 ret = (tp - entry) / entry * 100.0
                 return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
         else:
+            if open_val >= sl:
+                ret = (entry - open_val * (1.0 + slippage_pct / 100.0)) / entry * 100.0
+                return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
+            if open_val <= tp:
+                ret = (entry - open_val) / entry * 100.0
+                return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
+                
             hit_sl = high_val >= sl
             hit_tp = low_val <= tp
             if hit_sl and hit_tp:
-                if open_val > entry:
-                    ret = (entry - sl * (1.0 + slippage_pct / 100.0)) / entry * 100.0
-                else:
-                    ret = (entry - tp) / entry * 100.0
+                # Conservative same-bar resolution: assume the STOP filled first.
+                ret = (entry - sl * (1.0 + slippage_pct / 100.0)) / entry * 100.0
                 return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
             elif hit_sl:
                 ret = (entry - sl * (1.0 + slippage_pct / 100.0)) / entry * 100.0
@@ -129,7 +133,7 @@ def simulate(
                 return (ret - cost_pct if deduct_costs else ret), (i - entry_idx)
 
     # Time-based exit at close of max_bars
-    last_close = float(c[end_idx - 1])
+    last_close = float(c[end_idx - 1]) * (1.0 - sign * (slippage_pct / 100.0))
     ret = sign * (last_close - entry) / entry * 100.0
     return (ret - cost_pct if deduct_costs else ret), (end_idx - 1 - entry_idx)
 
@@ -144,7 +148,7 @@ def simulate_exit(
     cost_pct: float = DEFAULT_ROUND_TRIP_COST_PCT,
     slippage_pct: float = DEFAULT_SLIPPAGE_PCT,
     entry_delay_bars: int = 1,
-    deduct_costs: bool = False,
+    deduct_costs: bool = True,
 ) -> Optional[Tuple[float, int]]:
     """DataFrame convenience wrapper around simulate()."""
     if entry_idx < 0 or entry_idx >= len(frame):

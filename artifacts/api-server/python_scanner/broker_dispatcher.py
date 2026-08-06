@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import zlib
+from functools import lru_cache
 from datetime import datetime, timedelta
 from typing import Any, Optional
 from zoneinfo import ZoneInfo
@@ -19,7 +21,59 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 from broker_angel import get_client as get_angel_client, credentials_available as angel_available
-from broker_upstox import get_upstox_client, credentials_available as upstox_available
+from broker_upstox import (
+    get_upstox_client,
+    credentials_available as upstox_creds_available,
+    session_available as upstox_session_available,
+)
+
+
+def upstox_available() -> bool:
+    """Upstox is usable only with a real access token, not merely a config file.
+
+    Gating on credentials_available() alone let the prefetcher assign 118 of the
+    236 symbols to a broker with no OAuth token; every fetch for those symbols
+    failed and they silently fell back to delayed Yahoo data until the failure
+    counter tripped.
+    """
+    return upstox_creds_available() and upstox_session_available()
+
+
+@lru_cache(maxsize=1)
+def _universe_slots() -> dict[str, int]:
+    """Exact 50/50 assignment over the known universe, computed once.
+
+    Index parity over the SORTED universe is both perfectly balanced and stable
+    across processes (unlike parity over the caller's list order, which changes
+    whenever the caller filters or reorders).
+    """
+    try:
+        from nifty50 import NIFTY236_SYMBOLS
+    except Exception:
+        return {}
+    return {s: i % 2 for i, s in enumerate(sorted(NIFTY236_SYMBOLS))}
+
+
+def symbol_slot(symbol: str) -> int:
+    """Stable 0/1 partition of a symbol across the two brokers.
+
+    Must NOT use the builtin hash(): Python salts str hashing per interpreter
+    (PYTHONHASHSEED), so hash(symbol) % 2 is re-tossed on every process start
+    and differs between the parent and each ProcessPoolExecutor worker. That
+    made the broker a symbol was tried against nondeterministic across restarts
+    AND unrelated to the index-parity split prefetch actually used, so the two
+    paths disagreed on roughly half the universe.
+
+    Symbols in the known universe get an exact 50/50 assignment; anything else
+    falls back to a stable checksum.
+    """
+    slots = _universe_slots()
+    if symbol in slots:
+        return slots[symbol]
+    bare = symbol.replace(".NS", "")
+    if bare in slots:
+        return slots[bare]
+    return zlib.crc32(symbol.encode("utf-8")) % 2
 
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
@@ -37,23 +91,49 @@ class MultiBrokerDispatcher:
         self._upstox_failures = 0
 
     def status(self) -> dict[str, Any]:
-        angel_ok = angel_available()
-        upstox_ok = upstox_available()
-        # In split mode across our 236 Nifty universe:
-        angel_count = 118 if (angel_ok and upstox_ok and self.balance_mode == "split") else (236 if angel_ok else 0)
-        upstox_count = 118 if (angel_ok and upstox_ok and self.balance_mode == "split") else (236 if upstox_ok else 0)
+        """Report the ACTUAL split, measured from the same partition function
+        the prefetcher uses.
+
+        This previously hardcoded 118/118 and "50/50 Equal Load Balancing"
+        whenever credentials merely parsed, so the dashboard showed a healthy
+        dual-broker load at the exact moment split_symbols was routing 236/0 to
+        a single broker because the other one's failure counter had tripped.
+        """
+        try:
+            from nifty50 import NIFTY236_SYMBOLS as universe
+        except Exception:
+            universe = []
+        split = self.split_symbols(list(universe))
+        angel_count, upstox_count = len(split["angel"]), len(split["upstox"])
+        total = angel_count + upstox_count
+        if total == 0:
+            ratio = "NO BROKER AVAILABLE"
+        elif angel_count and upstox_count:
+            ratio = f"{round(100 * angel_count / total)}/{round(100 * upstox_count / total)} Angel/Upstox"
+        else:
+            ratio = "100% Angel One" if angel_count else "100% Upstox"
         return {
             "balance_mode": self.balance_mode,
             "equity_broker": self.equity_broker,
             "options_broker": self.options_broker,
-            "angel_available": angel_ok,
-            "upstox_available": upstox_ok,
+            # Credentials parsing is not health. Report each layer separately so
+            # "the config file exists" can never be mistaken for "we are logged in".
+            "angel_credentials": angel_available(),
+            "upstox_credentials": upstox_creds_available(),
+            "upstox_authenticated": upstox_session_available(),
+            "angel_available": angel_available() and self._angel_failures < 5,
+            "upstox_available": upstox_available() and self._upstox_failures < 5,
+            "upstox_status": (
+                "OK" if upstox_session_available()
+                else "NO_ACCESS_TOKEN - run upstox_login.py to complete the OAuth flow "
+                     "(Upstox tokens expire daily ~03:30 IST and cannot self-renew)"
+            ),
             "angel_failures": self._angel_failures,
             "upstox_failures": self._upstox_failures,
-            "total_symbols_managed": 236,
+            "total_symbols_managed": len(universe),
             "angel_assigned_count": angel_count,
             "upstox_assigned_count": upstox_count,
-            "split_ratio": "50/50 Equal Load Balancing" if (angel_count == 118 and upstox_count == 118) else ("100% Upstox" if upstox_count == 236 else "100% Angel One"),
+            "split_ratio": ratio,
         }
 
     def split_symbols(self, symbols: list[str]) -> dict[str, list[str]]:
@@ -62,9 +142,13 @@ class MultiBrokerDispatcher:
         upstox_ok = upstox_available() and self._upstox_failures < 5
 
         if self.balance_mode == "split" and angel_ok and upstox_ok:
-            # 50/50 split based on index
-            angel_syms = [s for i, s in enumerate(symbols) if i % 2 == 0]
-            upstox_syms = [s for i, s in enumerate(symbols) if i % 2 == 1]
+            # Partition by the SAME stable function that fetch_ohlcv's failover
+            # order uses. Index parity was used here while failover used
+            # hash(symbol), so the two disagreed on roughly half the universe:
+            # a symbol prefetched into Angel's store would be tried against
+            # Upstox first on a live fetch.
+            angel_syms = [s for s in symbols if symbol_slot(s) == 0]
+            upstox_syms = [s for s in symbols if symbol_slot(s) == 1]
             return {"angel": angel_syms, "upstox": upstox_syms}
         elif upstox_ok and (not angel_ok or self.balance_mode == "upstox_primary"):
             return {"angel": [], "upstox": list(symbols)}
@@ -104,7 +188,7 @@ class MultiBrokerDispatcher:
             order = ["upstox", "angel"]
         else:
             # Default or split mode uses symbol hash or failure counts
-            if hash(symbol) % 2 == 0:
+            if symbol_slot(symbol) == 0:
                 order = ["angel", "upstox"]
             else:
                 order = ["upstox", "angel"]
@@ -121,6 +205,9 @@ class MultiBrokerDispatcher:
                             with self._lock:
                                 self._upstox_failures = max(0, self._upstox_failures - 1)
                             return df, "upstox"
+                        else:
+                            with self._lock:
+                                self._upstox_failures += 1
                 except Exception as exc:
                     logger.debug("Upstox fetch_ohlcv failover for %s: %s", symbol, exc)
                     with self._lock:
@@ -137,6 +224,9 @@ class MultiBrokerDispatcher:
                             with self._lock:
                                 self._angel_failures = max(0, self._angel_failures - 1)
                             return df, "angel"
+                        else:
+                            with self._lock:
+                                self._angel_failures += 1
                 except Exception as exc:
                     logger.debug("Angel fetch_ohlcv failover for %s: %s", symbol, exc)
                     with self._lock:
@@ -163,7 +253,15 @@ class MultiBrokerDispatcher:
             return client.place_order(symbol, transaction_type, quantity, order_type, price, trigger_price, product, tag)
         else:
             client = get_angel_client()
-            return client.place_order(symbol, transaction_type, quantity, order_type, price, trigger_price, tag)
+            # Call by keyword: Angel's signature has variety/product_type BEFORE
+            # tag, so passing tag positionally (the old bug) bound it to variety
+            # and corrupted the order while losing the idempotency tag.
+            return client.place_order(
+                symbol, transaction_type, quantity,
+                order_type=order_type, price=price, trigger_price=trigger_price,
+                product_type=("INTRADAY" if str(product).upper() in ("I", "MIS", "INTRADAY") else "DELIVERY"),
+                tag=tag,
+            )
 
     def place_bracket_order(
         self,
@@ -200,7 +298,7 @@ class MultiBrokerDispatcher:
             return self.options_broker
         if self.equity_broker in ("angel", "upstox"):
             return self.equity_broker
-        if hash(symbol) % 2 == 0 and angel_available():
+        if symbol_slot(symbol) == 0 and angel_available():
             return "angel"
         return "upstox" if upstox_available() else "angel"
 

@@ -103,7 +103,7 @@ export default function Trades() {
 
               return (
                 <div
-                  key={`${trade.symbol}-${trade.timeframe}-${i}`}
+                  key={`${trade.symbol}-${trade.timeframe}`}
                   className="bg-card border border-border rounded-lg overflow-hidden flex flex-col"
                   style={{ contentVisibility: "auto", containIntrinsicSize: "420px" }}
                 >
@@ -267,7 +267,7 @@ export default function Trades() {
                       {trade.setup || "—"}
                     </span>
                     <Link
-                      href={`/chart/${trade.symbol}/${trade.timeframe}`}
+                      href={`/chart/${encodeURIComponent(trade.symbol)}/${trade.timeframe}`}
                       className="text-xs text-primary hover:text-primary/80 font-medium flex items-center"
                     >
                       Chart <ArrowRight className="h-3 w-3 ml-1" />

@@ -170,14 +170,16 @@ class AngelTickFeed:
         while not self._stop.is_set():
             if not self._in_feed_window():
                 self._connected.clear()
-                time.sleep(30)
+                if self._stop.wait(30):
+                    break
                 continue
             try:
                 from broker_angel import get_client
                 jwt, api_key, client_id, feed_token = get_client().feed_credentials
             except Exception as exc:
                 logger.warning("Angel feed: credentials unavailable: %s", exc)
-                time.sleep(60)
+                if self._stop.wait(60):
+                    break
                 continue
 
             def on_open(ws):
@@ -223,7 +225,8 @@ class AngelTickFeed:
             self._ws = None
             if self._stop.is_set():
                 break
-            time.sleep(backoff)
+            if self._stop.wait(backoff):
+                break
             backoff = min(backoff * 1.7, 30.0)
             if self.seconds_since_last_packet() is not None and self.seconds_since_last_packet() < 120:
                 backoff = 2.0  # recent data → transient blip, reconnect fast

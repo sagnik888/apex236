@@ -1,6 +1,6 @@
 def get_sector(symbol: str) -> str:
     s = symbol.upper().replace(".NS", "").replace(".BO", "")
-    if "BANK" in s or s in ("HDFC", "SBI", "ICICI", "AXIS", "KOTAK", "INDUSIND", "PNB", "BOB", "CANBK", "AUBANK", "FEDERALBNK", "IDFCFIRSTB"): 
+    if "BANK" in s or s in ("HDFC", "SBIN", "ICICI", "AXIS", "KOTAK", "INDUSINDBK", "PNB", "BOB", "CANBK", "AUBANK", "FEDERALBNK", "IDFCFIRSTB", "BANDHANBNK", "INDIANB"): 
         return "BANK"
     if s in ("TCS", "INFY", "WIPRO", "HCLTECH", "TECHM", "LTIM", "MPHASIS", "COFORGE", "PERSISTENT"): 
         return "IT"

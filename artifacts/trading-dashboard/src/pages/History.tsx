@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Loader2, History as HistoryIcon } from "lucide-react";
+import { customFetch } from "@workspace/api-client-react";
 
 // Closed-trade log. Data comes from the backend DB (/api/history), which is
 // outside the generated OpenAPI client, so this page uses fetch directly.
@@ -21,9 +22,7 @@ type ClosedTrade = {
 };
 
 async function fetchHistory(): Promise<{ trades: ClosedTrade[]; total: number }> {
-  const r = await fetch("/api/history?limit=500");
-  if (!r.ok) throw new Error(`GET /api/history ${r.status}`);
-  return r.json();
+  return customFetch("/api/history?limit=500");
 }
 
 function fmt(ts: string | null): string {
@@ -56,9 +55,12 @@ export default function HistoryPage() {
   const trades = data?.trades ?? [];
   const wins = trades.filter((t) => (t.pnl_pct ?? 0) > 0).length;
   const losses = trades.filter((t) => (t.pnl_pct ?? 0) < 0).length;
-  const decided = wins + losses;
+  const decided = trades.length;
   const wr = decided ? ((wins / decided) * 100).toFixed(1) : "0.0";
-  const totalPnl = trades.reduce((s, t) => s + (t.pnl_pct ?? 0), 0);
+  const avgPnl = decided ? trades.reduce((s, t) => s + (t.pnl_pct ?? 0), 0) / decided : 0;
+  const avgWin = wins ? trades.filter((t) => (t.pnl_pct ?? 0) > 0).reduce((s, t) => s + (t.pnl_pct ?? 0), 0) / wins : 0;
+  const avgLoss = losses ? trades.filter((t) => (t.pnl_pct ?? 0) < 0).reduce((s, t) => s + (t.pnl_pct ?? 0), 0) / losses : 0;
+  const profitFactor = avgLoss !== 0 ? Math.abs((avgWin * wins) / (avgLoss * losses)) : 0;
 
   return (
     <div className="h-full overflow-y-auto">
@@ -75,9 +77,10 @@ export default function HistoryPage() {
             <div className="flex items-center gap-4 text-xs">
               <span className="text-muted-foreground">{trades.length} closed</span>
               <span className="text-muted-foreground">WR <span className="font-mono text-foreground">{wr}%</span></span>
-              <span className={`font-mono ${totalPnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
-                {totalPnl >= 0 ? "+" : ""}{totalPnl.toFixed(2)}%
-              </span>
+              <span className="text-muted-foreground">Avg <span className={`font-mono ${avgPnl >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>{avgPnl >= 0 ? "+" : ""}{avgPnl.toFixed(2)}%</span></span>
+              <span className="text-muted-foreground">W̄ <span className="font-mono text-signal-buy">+{avgWin.toFixed(2)}%</span></span>
+              <span className="text-muted-foreground">L̄ <span className="font-mono text-signal-sell">{avgLoss.toFixed(2)}%</span></span>
+              <span className="text-muted-foreground">PF <span className={`font-mono ${profitFactor >= 1 ? "text-signal-buy" : "text-signal-sell"}`}>{profitFactor.toFixed(2)}</span></span>
             </div>
           )}
         </div>

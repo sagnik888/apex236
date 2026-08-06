@@ -27,7 +27,24 @@ def summarise(vals: np.ndarray) -> tuple[float, float, int]:
         return 0.0, 0.0, len(vals)
     m = float(vals.mean())
     se = float(vals.std(ddof=1) / np.sqrt(len(vals)))
+    se = float(vals.std(ddof=1) / np.sqrt(len(vals)))
     return m, (m / se if se > 0 else 0.0), len(vals)
+
+
+def select_top_n_with_sector_cap(g: pd.DataFrame, n_top: int, max_per_sector: int = 2) -> list[float]:
+    """Select top N trades for a day, enforcing a max_per_sector cap (bypassing 'NSE' fallback)."""
+    g_sorted = g.sort_values("pred", ascending=False)
+    picked_rows = []
+    sector_counts: dict[str, int] = {}
+    for _, row in g_sorted.iterrows():
+        sec = get_sector(str(row["symbol"]))
+        if sec == "NSE" or sector_counts.get(sec, 0) < max_per_sector:
+            picked_rows.append(row["net"])
+            if sec != "NSE":
+                sector_counts[sec] = sector_counts.get(sec, 0) + 1
+        if len(picked_rows) == n_top:
+            break
+    return picked_rows
 
 
 def main() -> int:
@@ -53,21 +70,12 @@ def main() -> int:
 
     for n_top in (1, 2, 3, 5, 8, 12, 20):
         picked, rand = [], []
-        for _, g in test.groupby("day"):
+        for _, g in test.groupby("ts"):
             g = g[np.isfinite(g["pred"])]
             if len(g) < n_top:
                 continue
             # Enforce max_per_sector=2 limit when selecting candidates (HIGH-14)
-            g_sorted = g.sort_values("pred", ascending=False)
-            picked_rows = []
-            sector_counts: dict[str, int] = {}
-            for _, row in g_sorted.iterrows():
-                sec = get_sector(str(row["symbol"]))
-                if sector_counts.get(sec, 0) < 2:
-                    picked_rows.append(row["net"])
-                    sector_counts[sec] = sector_counts.get(sec, 0) + 1
-                if len(picked_rows) == n_top:
-                    break
+            picked_rows = select_top_n_with_sector_cap(g, n_top)
             if len(picked_rows) < n_top:
                 continue
             picked.append(np.array(picked_rows, dtype=float))
@@ -86,7 +94,7 @@ def main() -> int:
     print()
     for n_bot in (5, 12):
         worst = []
-        for _, g in test.groupby("day"):
+        for _, g in test.groupby("ts"):
             g = g[np.isfinite(g["pred"])]
             if len(g) >= n_bot:
                 worst.append(g.nsmallest(n_bot, "pred")["net"].to_numpy(float))
@@ -100,10 +108,11 @@ def main() -> int:
     tl = test[test["is_long"] == 1.0]
     for n_top in (3, 5, 8):
         picked = []
-        for _, g in tl.groupby("day"):
+        for _, g in tl.groupby("ts"):
             g = g[np.isfinite(g["pred"])]
-            if len(g) >= n_top:
-                picked.append(g.nlargest(n_top, "pred")["net"].to_numpy(float))
+            picked_rows = select_top_n_with_sector_cap(g, n_top)
+            if len(picked_rows) == n_top:
+                picked.append(np.array(picked_rows, dtype=float))
         if picked:
             p = np.concatenate(picked)
             pm, pt, pn = summarise(p)

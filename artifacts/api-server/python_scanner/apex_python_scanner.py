@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import math
 import warnings
 from dataclasses import asdict, dataclass, field
@@ -34,6 +35,7 @@ import numpy as np
 import pandas as pd
 
 
+logger = logging.getLogger("apex.scanner")
 IST = "Asia/Kolkata"
 EPS = 1e-12
 __version__ = "2.0.0-audited"
@@ -76,6 +78,11 @@ class ApexConfig:
     force_fixed_sl: bool = False
     # Slippage percentage applied to entry and exit executions (HIGH-27)
     slippage_pct: float = 0.05
+    # Statutory round-trip charges (brokerage + STT + GST + stamp + exchange)
+    # deducted from realized pnl so the dashboard/analytics report NET results,
+    # not gross. Default 0.0 keeps CLI/research output gross; the live _CONFIGS
+    # set this to the real ~0.182% so the UI winrate is comparable to live.
+    round_trip_cost_pct: float = 0.0
     # Daily maximum cumulative loss percentage before triggering circuit breaker (HIGH-26)
     daily_max_loss_pct: float = 3.0
     # Maximum concurrent open positions allowed across the system
@@ -103,6 +110,17 @@ class ApexConfig:
     block_close_noise: bool = True
     close_noise_start: str = "15:00"
     timezone: str = IST
+
+    # Trade-style selector. Controls WHICH signals are generated and HOW trades
+    # are managed, aligned with the timeframe:
+    #   "intraday" — enter during the session, force EOD square-off (no overnight)
+    #   "btst"     — enter only late in the session, hold overnight (Buy Today Sell Tomorrow)
+    #   "swing"    — multi-day holds, higher timeframes, no square-off
+    #   "all"      — no style restriction (default)
+    trade_style: str = "all"
+    # The timeframe this config scans; set by the engine so run_symbol can apply
+    # timeframe-aware style rules (empty for ad-hoc/CLI runs).
+    timeframe: str = ""
 
     # Options guidance & trading engine (`options_engine.py`)
     enable_options: bool = True
@@ -132,6 +150,11 @@ class ApexConfig:
     entry_delay_bars: int = 1
     realistic_fills: bool = True
     allow_entry_on_last_bar: bool = True
+    # When False, the final bar of a live frame that is still forming (in
+    # progress) is treated as display-only: no new signal, entry fill, or
+    # exit/stop/trail decision is taken on it, eliminating intra-bar repaint.
+    # Historical/CLI runs leave this True because their last bar is closed.
+    act_on_forming_bar: bool = True
     cancel_pending_outside_session: bool = True
     keep_full_history: bool = True
     recent_trade_limit: int = 20
@@ -163,6 +186,8 @@ class ApexConfig:
             raise ValueError("swing_method must be Weighted, Average or Median")
         if self.strike_mode not in {"Smart Auto", "Always ATM", "Always OTM1", "Always ITM1"}:
             raise ValueError("Unsupported strike_mode")
+        if self.trade_style not in {"intraday", "intraday_btst", "btst", "swing", "all"}:
+            raise ValueError("trade_style must be intraday, intraday_btst, btst, swing or all")
         if self.atr_mult <= 0 or self.trail_mult <= 0:
             raise ValueError("ATR multipliers must be positive")
         if self.trail_start_r < 0:
@@ -232,6 +257,7 @@ class ActiveTrade:
     stop_mode: str
     option_type: str = ""
     option_strike: float = math.nan
+    signal_score: float = 0.0
     t1_hit: bool = False
     t2_hit: bool = False
     t3_hit: bool = False
@@ -239,6 +265,7 @@ class ActiveTrade:
     peak_price: float = math.nan
     trough_price: float = math.nan
     exit_confirmation_count: int = 0
+    trade_style: str = "swing"
 
 
 @dataclass(slots=True)
@@ -261,6 +288,20 @@ class TradeRecord:
     t3_hit: bool
     option_type: str = ""
     option_strike: float = math.nan
+    signal_score: float = 0.0
+    # Estimated P&L (% of premium) of the ATM option actually traded, after
+    # delta translation, theta decay over the hold, and round-trip spread — so
+    # analytics can show real option performance, not just the cash number.
+    option_pnl_pct: float = 0.0
+    trade_style: str = "swing"
+    # Terminal MFE/MAE extremes, carried so the closed row can record them.
+    # Without these the DB only ever sees peak/trough from a mid-flight ACTIVE
+    # snapshot, so a trade that opens and closes inside one scan reports its
+    # entry price as both extremes and every MAE/MFE statistic is unusable.
+    peak_price: float = math.nan
+    trough_price: float = math.nan
+    profit_locked: bool = False
+    exit_confirmation_count: int = 0
 
 
 @dataclass(slots=True)
@@ -391,8 +432,10 @@ class MarketDataProvider(Protocol):
 
 
 def _safe_div(numerator: pd.Series, denominator: pd.Series, default: float = 0.0) -> pd.Series:
-    den = denominator.replace(0.0, np.nan)
-    return numerator.div(den).replace([np.inf, -np.inf], np.nan).fillna(default)
+    res = numerator / denominator.replace(0.0, np.nan)
+    res = res.replace([np.inf, -np.inf], np.nan)
+    res[denominator == 0.0] = default
+    return res
 
 
 def sma(s: pd.Series, length: int) -> pd.Series:
@@ -407,6 +450,10 @@ def gap_aware_ema(s: pd.Series, length: int) -> pd.Series:
     """EMA with alpha adjustment across multi-day / weekend gaps (> 24 hours)."""
     if len(s) == 0:
         return s.copy()
+    
+    # Forward-fill NaNs to prevent corruption (C-02)
+    s = s.ffill()
+    
     alpha = 2.0 / (length + 1.0)
     values = pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
     out = np.full(len(values), np.nan, dtype=float)
@@ -428,36 +475,43 @@ def gap_aware_ema(s: pd.Series, length: int) -> pd.Series:
                 local_alpha = min(1.0, alpha * 2.5)
             previous = local_alpha * val + (1.0 - local_alpha) * previous
         out[i] = previous
+
+    # Warm-up guard, matching ema()'s min_periods=length. Without this the EMA
+    # is emitted from a single seed observation, so on a truncated rolling
+    # window (max_input_bars) ema50/ema200 carry a large seeding error at the
+    # window start and bull_trend/bear_trend flip between scans purely because
+    # the window slid. NaN until `length` observations have been seen.
+    warm_end = seed_pos + length - 1
+    if warm_end > 0:
+        out[: min(warm_end, len(out))] = np.nan
     return pd.Series(out, index=s.index, name=s.name)
 
 
 def rma(s: pd.Series, length: int) -> pd.Series:
-    """TradingView/Wilder RMA with an SMA seed.
-
-    ``Series.ewm(adjust=False)`` seeds from the first value, which is not the
-    same as Pine's ``ta.rma``. The difference can materially alter ATR, RSI,
-    DMI and ADX around thresholds, so the seed is calculated explicitly.
-    """
+    """TradingView/Wilder RMA with an SMA seed, using Pandas EWM for performance."""
     if length <= 0:
         raise ValueError("length must be positive")
-    values = pd.to_numeric(s, errors="coerce").to_numpy(dtype=float)
-    out = np.full(len(values), np.nan, dtype=float)
-    alpha = 1.0 / float(length)
-
-    valid_positions = np.flatnonzero(np.isfinite(values))
-    if len(valid_positions) < length:
-        return pd.Series(out, index=s.index, name=s.name)
-
-    seed_pos = int(valid_positions[length - 1])
-    seed_values = values[valid_positions[:length]]
-    out[seed_pos] = float(seed_values.mean())
-    previous = out[seed_pos]
-    for i in range(seed_pos + 1, len(values)):
-        value = values[i]
-        if np.isfinite(value):
-            previous = alpha * value + (1.0 - alpha) * previous
-        out[i] = previous
-    return pd.Series(out, index=s.index, name=s.name)
+        
+    # Forward-fill NaNs to prevent corruption (C-02)
+    s_ffill = s.ffill()
+    
+    # TradingView seeds RMA with an SMA
+    sma_seed = s_ffill.rolling(length, min_periods=length).mean()
+    
+    first_valid_idx = sma_seed.first_valid_index()
+    if first_valid_idx is None:
+        return pd.Series(np.nan, index=s.index, name=s.name)
+        
+    idx = s.index.get_loc(first_valid_idx)
+    
+    res = pd.Series(np.nan, index=s.index, name=s.name)
+    seed_val = sma_seed.iloc[idx]
+    
+    sub_s = s_ffill.iloc[idx:].copy()
+    sub_s.iloc[0] = seed_val
+    
+    res.iloc[idx:] = sub_s.ewm(alpha=1.0/length, adjust=False).mean()
+    return res
 
 
 def true_range(df: pd.DataFrame) -> pd.Series:
@@ -587,11 +641,16 @@ def _infer_base_seconds(index: pd.DatetimeIndex) -> float:
 
 
 def _rule_seconds(rule: str) -> float:
-    return float(pd.Timedelta(rule).total_seconds())
+    try:
+        return float(pd.Timedelta(rule).total_seconds())
+    except Exception:
+        if "M" in rule:
+            return 2592000.0
+        return 0.0
 
 
-def _is_daily_or_higher(rule: str) -> bool:
-    return _rule_seconds(rule) >= 86400.0 - EPS
+def _is_exact_day(rule: str) -> bool:
+    return 86400.0 - EPS <= _rule_seconds(rule) <= 86400.0 + EPS
 
 
 def resample_ohlcv(
@@ -602,7 +661,7 @@ def resample_ohlcv(
 ) -> pd.DataFrame:
     """Resample OHLCV without shifting exchange sessions by one calendar day."""
     aggregation = {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-    if _is_daily_or_higher(rule):
+    if _is_exact_day(rule):
         # Calendar-midnight right-closed resampling labels an Indian session at
         # the following midnight, causing previous-day features to lag by two
         # sessions. Group on the actual local trading date instead.
@@ -612,8 +671,15 @@ def resample_ohlcv(
         return grouped.dropna(subset=["open", "high", "low", "close"])
 
     side = "right" if timestamps_are_bar_close else "left"
+    
+    actual_rule = rule
+    if rule == "1W":
+        actual_rule = "W"
+    elif rule == "1M":
+        actual_rule = "ME"
+        
     return (
-        df.resample(rule, label=side, closed=side)
+        df.resample(actual_rule, label=side, closed=side)
         .agg(aggregation)
         .dropna(subset=["open", "high", "low", "close"])
     )
@@ -635,7 +701,7 @@ def previous_closed_mtf(
     if _rule_seconds(rule) < _infer_base_seconds(df.index) - EPS:
         return feature_builder(df).shift(1)
     working = df
-    if timestamps_are_bar_close and not _is_daily_or_higher(rule):
+    if timestamps_are_bar_close and not _is_exact_day(rule):
         # Convert close-labeled base candles to their open timestamps before
         # resampling. This reproduces TradingView's bar-open clock semantics:
         # the HTF bar that just closed becomes available from the next base bar.
@@ -644,7 +710,7 @@ def previous_closed_mtf(
 
     htf = resample_ohlcv(working, rule, timestamps_are_bar_close=False)
     values = feature_builder(htf).shift(1)
-    if _is_daily_or_higher(rule):
+    if _is_exact_day(rule):
         keys = pd.DatetimeIndex(df.index.normalize())
         mapped = values.reindex(keys)
         return pd.Series(mapped.to_numpy(), index=df.index, name=values.name)
@@ -675,7 +741,11 @@ def _bar_close_times(index: pd.DatetimeIndex, timestamps_are_bar_close: bool) ->
 
 def regime_code(frame: pd.DataFrame) -> pd.Series:
     atr_local = atr(frame, 14)
-    atr_ratio = _safe_div(atr_local, sma(atr_local, 50), default=1.0)
+    # min_periods keeps the volatility baseline (and therefore the HTF regime)
+    # meaningful on short up-resampled frames (e.g. ~16-25 4h/1d bars derived
+    # from the 15m window) instead of collapsing to the neutral default.
+    atr_baseline = atr_local.rolling(50, min_periods=10).mean()
+    atr_ratio = _safe_div(atr_local, atr_baseline, default=1.0)
     e50 = ema(frame["close"], 50)
     _, _, adx_local = dmi_adx(frame, 14, 14)
     bull = frame["close"] > e50
@@ -782,9 +852,29 @@ def select_option_strike(
     config: ApexConfig,
     high_volatility: bool,
     trending: bool,
+    symbol: str = "",
 ) -> tuple[str, float]:
+    """Pick the option type and strike for a cash signal.
+
+    `symbol` is the real ticker (e.g. "RELIANCE.NS"). It must be supplied:
+    the contract lookup used to be handed `profile.name`, which is the
+    instrument CLASS label ("Stock") for every NSE equity, so the one place the
+    scanner touched the broker's real contract master asked it for an underlying
+    literally named "Stock" and always missed.
+    """
     if not config.enable_options or not profile.supports_index_options:
         return "", math.nan
+
+    # Do not emit option guidance for an underlying the exchange lists no
+    # options on. 33 of the 236 scanned symbols are not F&O-eligible, and the
+    # synthetic strike ladder happily invented a strike for every one of them.
+    if symbol:
+        try:
+            from options_engine import underlying_has_options
+            if underlying_has_options(symbol) is False:
+                return "", math.nan
+        except Exception:
+            pass
 
     offset = 0
     if config.strike_mode == "Always ATM":
@@ -801,22 +891,35 @@ def select_option_strike(
         else:
             offset = 1
 
-    if config.trade_options_intraday:
+    if config.trade_options_intraday and symbol:
         try:
             from options_engine import resolve_atm_option
             contract = resolve_atm_option(
-                underlying_symbol=profile.name,
+                underlying_symbol=symbol,
                 spot_price=underlying_price,
                 direction="LONG" if is_ce else "SHORT",
                 strike_offset=offset,
             )
-            if contract and contract.get("strike"):
-                return ("CE" if is_ce else "PE"), float(contract["strike"])
+            # The real master's key is `strike_price`; `strike` does not exist,
+            # so this test never passed and the synthetic ladder below always won.
+            if contract and contract.get("strike_price"):
+                return ("CE" if is_ce else "PE"), float(contract["strike_price"])
+        except Exception:
+            logger.debug("Option contract lookup failed for %s", symbol, exc_info=True)
+
+    # Fallback only. profile.strike_interval is a flat 50.0 for every NSE
+    # equity, but real stock-option ladders run from 2.5 to 500 per underlying,
+    # so this synthesises strikes that frequently do not exist on the exchange.
+    # Prefer the master-derived step when we know the ticker.
+    interval = profile.strike_interval
+    if symbol:
+        try:
+            from options_engine import resolve_strike_step
+            interval = float(resolve_strike_step(symbol, underlying_price)) or interval
         except Exception:
             pass
-
-    atm = calculate_atm(underlying_price, profile.strike_interval)
-    strike = atm + (offset * profile.strike_interval * (1 if is_ce else -1))
+    atm = calculate_atm(underlying_price, interval)
+    strike = atm + (offset * interval * (1 if is_ce else -1))
     return ("CE" if is_ce else "PE"), float(strike)
 
 
@@ -1103,7 +1206,8 @@ def build_feature_frame(
     f["rsi_5m_prev"] = previous_feature("5min", lambda x: rsi(x["close"], 14), f["rsi"])
     f["ema9_15m_prev"] = previous_feature("15min", lambda x: ema(x["close"], 9), f["ema9"])
     f["ema21_15m_prev"] = previous_feature("15min", lambda x: ema(x["close"], 21), f["ema21"])
-    f["ema9_15m_slope"] = f["ema9_15m_prev"] - f["ema9_15m_prev"].shift(3)
+    # FIX SIG-04: Calculate slope on the HTF dataframe before forward-filling
+    f["ema9_15m_slope"] = previous_feature("15min", lambda x: ema(x["close"], 9) - ema(x["close"], 9).shift(3), f["ema9"] - f["ema9"].shift(3))
 
     f["high_volatility"] = f["atr_expansion"] > 1.25
     f["normal_volatility"] = f["atr_expansion"].between(0.85, 1.25)
@@ -1124,9 +1228,19 @@ def build_feature_frame(
     patterns = build_pattern_features(df, f, config)
     f = f.join(patterns)
 
+    # FIX SIG-01: Reward pullbacks TO value, not extensions AWAY from it.
+    # Old logic gave 14 pts for overextension (exhaustion candles) — now reversed.
     vwap_dev = _safe_div((df["close"] - f["vwap"]).abs(), f["vwap"], default=0.0)
-    vwap_bull = pd.Series(np.where(df["close"] > f["vwap"], np.where(vwap_dev > 0.003, 14.0, 7.0), 0.0), index=df.index)
-    vwap_bear = pd.Series(np.where(df["close"] < f["vwap"], np.where(vwap_dev > 0.003, 14.0, 7.0), 0.0), index=df.index)
+    vwap_bull = pd.Series(np.where(
+        df["close"] > f["vwap"],
+        np.where(vwap_dev < 0.002, 14.0, np.where(vwap_dev < 0.005, 7.0, 3.0)),
+        0.0,
+    ), index=df.index)
+    vwap_bear = pd.Series(np.where(
+        df["close"] < f["vwap"],
+        np.where(vwap_dev < 0.002, 14.0, np.where(vwap_dev < 0.005, 7.0, 3.0)),
+        0.0,
+    ), index=df.index)
     new_5_high = df["close"] > df["high"].rolling(5, min_periods=5).max().shift(1)
     new_5_low = df["close"] < df["low"].rolling(5, min_periods=5).min().shift(1)
 
@@ -1143,14 +1257,32 @@ def build_feature_frame(
     )
 
     # 2. RSI Divergence proxy
-    rsi_bull_div = new_5_low & (f["rsi"] > f["rsi"].rolling(5).min().shift(1))
-    rsi_bear_div = new_5_high & (f["rsi"] < f["rsi"].rolling(5).max().shift(1))
+    # FIX SIG-02: Use structural swing divergence, not breakdown-bar divergence.
+    # Old logic bought the exact bar that broke support. Now requires a higher
+    # low in RSI over a wider window AND the close must be above anchor_low_3
+    # (i.e., NOT a breakdown bar).
+    anchor_low_3_val = df["low"].rolling(3, min_periods=3).min()
+    anchor_high_3_val = df["high"].rolling(3, min_periods=3).max()
+    rsi_bull_div = (
+        (df["close"] > anchor_low_3_val.shift(1))  # NOT a breakdown bar
+        & (f["rsi"] > f["rsi"].rolling(10).min().shift(1))  # RSI higher low
+        & (df["close"] < f["ema21"])  # price is pulled back (not overextended)
+        & (f["rsi"] > 35.0)  # RSI not in crash zone
+    )
+    rsi_bear_div = (
+        (df["close"] < anchor_high_3_val.shift(1))  # NOT a breakout bar
+        & (f["rsi"] < f["rsi"].rolling(10).max().shift(1))  # RSI lower high
+        & (df["close"] > f["ema21"])  # price is bounced up (not overextended)
+        & (f["rsi"] < 65.0)  # RSI not in extreme zone
+    )
 
     bull_raw = pd.Series(bull_adx, index=df.index, dtype=float)
     bull_raw += np.where((f["macd"] > f["macd_signal"]) & f["macd_acc_bull"], 18.0, np.where(f["macd"] > f["macd_signal"], 10.0, 0.0))
     bull_raw += vwap_bull
     bull_raw += np.where((f["ema9"] > f["ema21"]) & (f["ema21"] > f["ema50"]), 14.0, np.where(f["ema9"] > f["ema21"], 7.0, 0.0))
-    bull_raw += np.where(f["volume_spike"] & (f["body_position"] > 0.6), 12.0, np.where(f["volume_above"] & (f["body_position"] > 0.5), 6.0, 0.0))
+    # FIX SIG-01 (cont): Reduce volume spike reward from 12 → 6 to stop
+    # rewarding blow-off tops. Healthy volume gets the same weight.
+    bull_raw += np.where(f["volume_spike"] & (f["body_position"] > 0.6), 6.0, np.where(f["volume_above"] & (f["body_position"] > 0.5), 6.0, 0.0))
     bull_raw += ((f["rsi"] - 50.0) * 0.5).clip(lower=0.0, upper=10.0)
     bull_raw += np.where(config.use_htf, np.where((f["ema9_15m_prev"] > f["ema21_15m_prev"]) & (f["ema9_15m_slope"] > 0.0), 8.0, 0.0), 4.0)
     bull_raw += np.where(f["rsi_5m_prev"] > 50.0, 4.0, 0.0)
@@ -1163,7 +1295,8 @@ def build_feature_frame(
     bear_raw += np.where((f["macd"] < f["macd_signal"]) & f["macd_acc_bear"], 18.0, np.where(f["macd"] < f["macd_signal"], 10.0, 0.0))
     bear_raw += vwap_bear
     bear_raw += np.where((f["ema9"] < f["ema21"]) & (f["ema21"] < f["ema50"]), 14.0, np.where(f["ema9"] < f["ema21"], 7.0, 0.0))
-    bear_raw += np.where(f["volume_spike"] & (f["body_position"] < 0.4), 12.0, np.where(f["volume_above"] & (f["body_position"] < 0.5), 6.0, 0.0))
+    # FIX SIG-01 (cont): Same reduction for bear side
+    bear_raw += np.where(f["volume_spike"] & (f["body_position"] < 0.4), 6.0, np.where(f["volume_above"] & (f["body_position"] < 0.5), 6.0, 0.0))
     bear_raw += ((50.0 - f["rsi"]) * 0.5).clip(lower=0.0, upper=10.0)
     bear_raw += np.where(config.use_htf, np.where((f["ema9_15m_prev"] < f["ema21_15m_prev"]) & (f["ema9_15m_slope"] < 0.0), 8.0, 0.0), 4.0)
     bear_raw += np.where(f["rsi_5m_prev"] < 50.0, 4.0, 0.0)
@@ -1186,31 +1319,35 @@ def build_feature_frame(
 
     bull_s = pd.Series(bull_raw, index=df.index).fillna(0)
     bear_s = pd.Series(bear_raw, index=df.index).fillna(0)
+    # FIX SIG-03: Use EXPANDING mean instead of 200-bar rolling mean.
+    # Rolling mean adapted too fast, suppressing scores during real trends
+    # and amplifying scores during fake-outs in choppy markets.
     if len(bull_s) > 30:
-        bull_norm = bull_s.rolling(200, min_periods=30).apply(lambda s: (s.iloc[-1] - s.mean()) / (s.std() + 1e-9) * 15.0 + 65.0, raw=False).fillna(bull_s)
-        bear_norm = bear_s.rolling(200, min_periods=30).apply(lambda s: (s.iloc[-1] - s.mean()) / (s.std() + 1e-9) * 15.0 + 65.0, raw=False).fillna(bear_s)
+        b_mean = bull_s.expanding(min_periods=30).mean()
+        b_std = bull_s.expanding(min_periods=30).std()
+        bull_norm = ((bull_s - b_mean) / (b_std + 1e-9) * 15.0 + 65.0).fillna(bull_s)
+
+        br_mean = bear_s.expanding(min_periods=30).mean()
+        br_std = bear_s.expanding(min_periods=30).std()
+        bear_norm = ((bear_s - br_mean) / (br_std + 1e-9) * 15.0 + 65.0).fillna(bear_s)
     else:
         bull_norm, bear_norm = bull_s, bear_s
 
     # Integrate AI continuous scoring / Z-score percentile scaling (CRIT-01)
-    if getattr(config, "use_ai_score_model", False):
-        try:
-            from scoring_model import ApexScoreModel
-            if getattr(config, "score_model_path", ""):
-                from pathlib import Path
-                m_path = Path(config.score_model_path)
-                if m_path.exists():
-                    model = ApexScoreModel.load(m_path)
-                else:
-                    model = None
-            else:
-                model = None
-            # If a fitted model is present, score directly; otherwise use continuous percentile mapping without hard 100.0 capping pileup
-            if model is not None and hasattr(model, "score"):
-                # Compute continuous scores if feature matrix can be built
-                pass
-        except Exception:
-            pass
+    # NOTE ON SCORING: the live gate uses the continuous Z-score sigmoid below,
+    # NOT the fitted ApexScoreModel in apex_score_model.json. Wiring the fitted
+    # model requires building its exact standardized feature matrix here; that
+    # was never implemented (the old code left a silent `pass`). Until it is,
+    # the calibration table in apex_score_model.json does NOT describe the live
+    # score, so do not treat min_score as a win-probability threshold. If a
+    # model path is configured, warn loudly rather than silently ignoring it.
+    if getattr(config, "use_ai_score_model", False) and getattr(config, "score_model_path", ""):
+        logger.warning(
+            "score_model_path=%r is set but the fitted-model scoring path is not "
+            "wired; falling back to the Z-score sigmoid. The apex_score_model.json "
+            "calibration does not describe the live score.",
+            config.score_model_path,
+        )
 
     # Continuous Z-score percentile ranking to avoid static saturation at 100.0
     f["bull_score"] = 100.0 / (1.0 + np.exp(-((bull_norm - 65.0) / 15.0)))
@@ -1401,7 +1538,7 @@ def calculate_stops(
     anchor_high: float,
     row: pd.Series,
     config: ApexConfig,
-) -> tuple[float, float, str]:
+) -> tuple[float, float, str, float]:
     if not np.isfinite(entry_price) or entry_price <= 0.0:
         raise ValueError("entry_price must be positive and finite")
     use_fixed = config.fixed_sl_pct > 0.0 and (
@@ -1410,7 +1547,7 @@ def calculate_stops(
     if use_fixed:
         sl1 = entry_price * (1.0 - config.fixed_sl_pct / 100.0) if is_long else entry_price * (1.0 + config.fixed_sl_pct / 100.0)
         sl2 = entry_price * (1.0 - config.fixed_sl_pct * 1.5 / 100.0) if is_long else entry_price * (1.0 + config.fixed_sl_pct * 1.5 / 100.0)
-        return float(sl1), float(sl2), "Fixed %"
+        return float(sl1), float(sl2), "Fixed %", float(sl1)
 
     mult = config.atr_mult * (1.3 if bool(row["high_volatility"]) else 0.8 if bool(row["low_volatility"]) else 1.0)
     atr_value = float(row["atr"])
@@ -1421,14 +1558,46 @@ def calculate_stops(
 
     # A next-bar gap can place a swing-anchored stop on the wrong side of the
     # actual entry. Enforce a minimum protective distance and SL2 ordering.
-    minimum_distance = max(entry_price * 0.0001, atr_value * 0.05, EPS)
+    # FIX SIG-05: Use a meaningful minimum distance (0.3% of price or 0.2 ATR)
+    # instead of a near-zero value. If gap is too large, let calculate_stops
+    # return the values and the caller can decide to abort.
+    minimum_distance = max(entry_price * 0.003, atr_value * 0.2, EPS)
     if is_long:
         sl1 = min(sl1, entry_price - minimum_distance)
         sl2 = min(sl2, sl1 - minimum_distance)
     else:
         sl1 = max(sl1, entry_price + minimum_distance)
         sl2 = max(sl2, sl1 + minimum_distance)
-    return float(sl1), float(sl2), "ATR-Based"
+
+    # -------------------------------------------------------------------------
+    # LOSS GUARDS: Hard caps on max SL distance irrespective of scanner logic.
+    # 1.5% for intraday/BTST, 5% for swing.
+    #
+    # The 4th return value (original_sl1) is the PRE-CLAMP ATR stop. It is a
+    # diagnostic only — it must NOT be used to size targets. Feeding it to
+    # calculate_targets decouples reward from risk, because the position is
+    # protected at the clamped distance while the target scales with raw ATR.
+    # Measured effect when that was live: median R:R on 1h went from 2.0 to
+    # 7.5, TP1 was touched on 0.8% of trades, and the win rate fell to 25.5%.
+    # -------------------------------------------------------------------------
+    if config.timeframe in ["15m", "1h"]:
+        max_sl_pct = 1.5  # Max 1.5% risk for intraday/BTST
+    else:
+        max_sl_pct = 5.0  # Max 5.0% risk for swing
+
+    # Save the original ATR-based risk BEFORE clamping (for target calculation)
+    original_sl1 = sl1
+
+    if is_long:
+        max_sl_price = entry_price * (1.0 - max_sl_pct / 100.0)
+        sl1 = max(sl1, max_sl_price)
+        sl2 = max(sl2, entry_price * (1.0 - (max_sl_pct * 1.2) / 100.0))
+    else:
+        max_sl_price = entry_price * (1.0 + max_sl_pct / 100.0)
+        sl1 = min(sl1, max_sl_price)
+        sl2 = min(sl2, entry_price * (1.0 + (max_sl_pct * 1.2) / 100.0))
+
+    return float(sl1), float(sl2), "ATR-Based", float(original_sl1)
 
 
 def calculate_targets(is_long: bool, entry_price: float, sl1: float, config: ApexConfig) -> tuple[float, float, float]:
@@ -1436,7 +1605,13 @@ def calculate_targets(is_long: bool, entry_price: float, sl1: float, config: Ape
     if config.fixed_tp_pct > 0.0:
         # User-defined move targeting (e.g. book 0.5–1% moves) independent of
         # stop distance/market structure.
+        risk = abs(entry_price - sl1)
         step = entry_price * config.fixed_tp_pct / 100.0
+        
+        # RISK/REWARD GUARD: Enforce minimum 1.75 RR even on fixed step
+        if step < risk * 1.75:
+            step = risk * 1.75
+            
         return (
             float(entry_price + sign * step),
             float(entry_price + sign * step * 1.5),
@@ -1445,11 +1620,49 @@ def calculate_targets(is_long: bool, entry_price: float, sl1: float, config: Ape
     risk = abs(entry_price - sl1)
     if risk <= EPS:
         raise ValueError("Calculated stop risk is zero; check stop configuration")
+        
+    # RISK/REWARD GUARD: Enforce minimum 1.75 RR
+    t1_r = max(config.t1_r, 1.75)
+    t2_r = max(config.t2_r, t1_r + 1.0)
+    t3_r = max(config.t3_r, t2_r + 1.0)
+    
     return (
-        float(entry_price + sign * risk * config.t1_r),
-        float(entry_price + sign * risk * config.t2_r),
-        float(entry_price + sign * risk * config.t3_r),
+        float(entry_price + sign * risk * t1_r),
+        float(entry_price + sign * risk * t2_r),
+        float(entry_price + sign * risk * t3_r),
     )
+
+
+_OPT_BAR_DAYS = {"15m": 15 / 375.0, "1h": 60 / 375.0, "4h": 240 / 375.0, "1d": 1.0}
+
+
+def estimate_option_pnl_pct(
+    entry_price_cash: float,
+    cash_pnl_pct: float,
+    bars_held: int,
+    timeframe: str,
+    delta: float = 0.5,
+    prem_pct: float = 0.018,
+    theta_per_day_pct: float = 1.5,
+    roundtrip_spread_pct: float = 3.0,
+) -> float:
+    """Estimate the realized P&L (% of premium) of the ATM option that a cash
+    signal maps to: delta-translated directional gain, minus theta decay over
+    the holding period, minus the round-trip bid/ask spread. This is why a
+    winning cash signal can still lose on the option (small/slow moves) and why
+    option win rate is structurally below the cash number.
+    """
+    if not np.isfinite(entry_price_cash) or entry_price_cash <= 0:
+        return float(cash_pnl_pct)
+    premium = max(entry_price_cash * prem_pct, 1.0)
+    cash_abs_move = entry_price_cash * cash_pnl_pct / 100.0
+    opt_abs_gain = delta * cash_abs_move
+    bar_days = _OPT_BAR_DAYS.get(timeframe, 0.1)
+    theta_decay = premium * (theta_per_day_pct / 100.0) * bar_days * max(0, int(bars_held))
+    spread_cost = premium * (roundtrip_spread_pct / 100.0)
+    opt_abs_pnl = opt_abs_gain - theta_decay - spread_cost
+    opt_abs_pnl = max(opt_abs_pnl, -premium)
+    return float(opt_abs_pnl / premium * 100.0)
 
 
 def dynamic_min_score(base_score: float, consecutive_losses: int) -> float:
@@ -1510,7 +1723,12 @@ def _planned_levels(
     if not all(np.isfinite(x) for x in (anchor_low, anchor_high, signal_row["atr"])):
         return math.nan, math.nan, math.nan, math.nan
     try:
-        sl1, _, _ = calculate_stops(is_long, reference_price, anchor_low, anchor_high, signal_row, config)
+        sl1, _, _, _ = calculate_stops(is_long, reference_price, anchor_low, anchor_high, signal_row, config)
+        # Targets are derived from the stop the position is ACTUALLY protected
+        # by. The previous EXIT-02 behaviour fed the pre-clamp ATR stop here,
+        # which decoupled reward from risk: the clamp caps risk at 1.5%
+        # (intraday) while the target kept scaling with raw ATR, producing
+        # 5-12R targets that were unreachable inside the holding period.
         tp1, tp2, tp3 = calculate_targets(is_long, reference_price, sl1, config)
         return sl1, tp1, tp2, tp3
     except (TypeError, ValueError, FloatingPointError):
@@ -1565,6 +1783,13 @@ class ApexScanner:
     def __init__(self, config: Optional[ApexConfig] = None):
         self.config = config or ApexConfig()
         self.config.validate()
+        if self.config.entry_delay_bars == 0:
+            logger.warning(
+                "entry_delay_bars=0 (Pine same-bar fill) enters at the signal "
+                "bar's own open after seeing its close — this is LOOKAHEAD and "
+                "must be used for research/parity only, never for reported "
+                "tradeable win rate or live trading."
+            )
 
     def run_symbol(
         self,
@@ -1573,8 +1798,12 @@ class ApexScanner:
         *,
         exchange: str = "NSE",
         asset_type: str = "",
+        last_bar_is_forming: bool = False,
     ) -> SymbolResult:
         cfg = self.config
+        # When the caller reports the final bar is still forming and the config
+        # forbids acting on it, the last bar is decision-inert (display only).
+        forming_inert = bool(last_bar_is_forming) and not cfg.act_on_forming_bar
         df = normalize_ohlcv(data, cfg)
         if cfg.max_input_bars > 0 and len(df) > cfg.max_input_bars:
             df = df.tail(cfg.max_input_bars).copy()
@@ -1620,24 +1849,54 @@ class ApexScanner:
         current_date = None
         daily_cum_loss_pct = 0.0
 
+        last_index = len(row_values) - 1
+        # Trade-style setup (intraday / btst / swing / all).
+        style = cfg.trade_style
+        style_intraday = style == "intraday"
+        style_btst = style == "btst"
+        tf_is_short = cfg.timeframe in ("15m", "1h")
+        close_min = _time_minutes(cfg.market_close)
+        # BTST enters only in the last ~45 min of the session so the position is
+        # deliberately carried overnight rather than opened early and squared off.
+        btst_entry_after = close_min - 45
+        bar_close_idx = row_positions["bar_close_time"]
         for i, values in enumerate(row_values):
             row = _FastRow(values, row_positions)
             timestamp = pd.Timestamp(row["bar_close_time"])
             bar_open_time = pd.Timestamp(row["bar_open_time"])
             exited_this_bar = False
+            # A still-forming final bar is display-only: no entry/exit/signal
+            # decision is taken on it, so intra-bar prints cannot repaint trades.
+            decide_on_bar = not (forming_inert and i == last_index)
 
             if timestamp.date() != current_date:
                 current_date = timestamp.date()
                 daily_cum_loss_pct = 0.0
 
+            # Session-boundary + time-of-day, used by the trade-style rules below.
+            bar_minutes = timestamp.hour * 60 + timestamp.minute
+            if i < last_index:
+                next_date = pd.Timestamp(row_values[i + 1][bar_close_idx]).date()
+                session_last_bar = next_date != timestamp.date()
+            else:
+                session_last_bar = True
+
             # Execute a signal only after the configured delay. The default is
             # next-bar open, removing the source script's same-bar lookahead.
-            if pending is not None and active is None and i >= pending["execute_bar"]:
+            if decide_on_bar and pending is not None and active is None and i >= pending["execute_bar"]:
                 can_fill_last_bar = i < len(f) - 1 or cfg.allow_entry_on_last_bar
                 session_allows_fill = bool(row["session_ok"])
                 if not can_fill_last_bar:
                     pass  # Keep pending for an external live execution layer.
                 elif cfg.cancel_pending_outside_session and not session_allows_fill:
+                    pending = None
+                    last_signal_state = 0
+                elif i <= pause_until_bar:
+                    # The circuit breaker gated signal CREATION only (see
+                    # can_signal), not the fill of an already-pending order. A
+                    # signal raised on the bar before the breaker tripped was
+                    # still filled on the next bar, so the breaker let one more
+                    # trade through every time it fired.
                     pending = None
                     last_signal_state = 0
                 else:
@@ -1649,58 +1908,91 @@ class ApexScanner:
                     anchor_high = float(anchor_row["anchor_high_3"])
                     if all(np.isfinite(x) for x in (entry_price, anchor_low, anchor_high, anchor_row["atr"])):
                         is_long = bool(pending["is_long"])
-                        try:
-                            sl1, sl2, stop_mode = calculate_stops(is_long, entry_price, anchor_low, anchor_high, anchor_row, cfg)
-                            tp1, tp2, tp3 = calculate_targets(is_long, entry_price, sl1, cfg)
-                        except (TypeError, ValueError, FloatingPointError):
-                            sl1 = sl2 = tp1 = tp2 = tp3 = math.nan
-                            stop_mode = ""
-                        if all(np.isfinite(x) for x in (sl1, sl2, tp1, tp2, tp3)):
-                            active = ActiveTrade(
-                                direction="LONG" if is_long else "SHORT",
-                                signal_time=pending["signal_time"],
-                                entry_time=bar_open_time,
-                                entry_bar=i,
-                                entry_price=entry_price,
-                                sl1=sl1,
-                                sl2=sl2,
-                                tsl=sl1,
-                                tp1=tp1,
-                                tp2=tp2,
-                                tp3=tp3,
-                                setup=pending["setup"],
-                                stop_mode=stop_mode,
-                                option_type=pending["option_type"],
-                                option_strike=pending["option_strike"],
-                                peak_price=entry_price,
-                                trough_price=entry_price,
-                            )
-                            total_entries += 1
-                            f.iat[i, f.columns.get_loc("entry_event")] = True
-                    pending = None
+                        
+                        # Determine intrinsic trade style
+                        is_btst = cfg.timeframe in ("1h", "4h") and bar_minutes >= btst_entry_after
+                        is_swing = cfg.timeframe in ("4h", "1d") and not is_btst
+                        intrinsic_style = "btst" if is_btst else "swing" if is_swing else "intraday"
+                        
+                        # Verify against user's trade style limits
+                        style_allowed = False
+                        if style == "intraday" and intrinsic_style == "intraday":
+                            style_allowed = True
+                        elif style in ("intraday_btst", "btst") and intrinsic_style in ("intraday", "btst"):
+                            style_allowed = True
+                        elif style in ("all", "swing"):
+                            style_allowed = True
+                            
+                        if not style_allowed:
+                            pending = None
+                            last_signal_state = 0
+                        else:
+                            try:
+                                sl1, sl2, stop_mode, _ = calculate_stops(is_long, entry_price, anchor_low, anchor_high, anchor_row, cfg)
+                                # Targets from the CLAMPED stop — see _planned_levels.
+                                tp1, tp2, tp3 = calculate_targets(is_long, entry_price, sl1, cfg)
+                            except (TypeError, ValueError, FloatingPointError):
+                                sl1 = sl2 = tp1 = tp2 = tp3 = math.nan
+                                stop_mode = ""
+                            if all(np.isfinite(x) for x in (sl1, sl2, tp1, tp2, tp3)):
+                                active = ActiveTrade(
+                                    direction="LONG" if is_long else "SHORT",
+                                    signal_time=pending["signal_time"],
+                                    entry_time=bar_open_time,
+                                    entry_bar=i,
+                                    entry_price=entry_price,
+                                    sl1=sl1,
+                                    sl2=sl2,
+                                    tsl=sl1,
+                                    tp1=tp1,
+                                    tp2=tp2,
+                                    tp3=tp3,
+                                    setup=pending["setup"],
+                                    stop_mode=stop_mode,
+                                    signal_score=float(pending.get("score", 0.0)),
+                                    option_type=pending["option_type"],
+                                    option_strike=pending["option_strike"],
+                                    peak_price=entry_price,
+                                    trough_price=entry_price,
+                                    trade_style=intrinsic_style,
+                                )
+                                total_entries += 1
+                                f.iat[i, f.columns.get_loc("entry_event")] = True
+                        pending = None
 
             # Manage an active trade using the stop/trail values known before
             # this bar's close. This avoids intrabar trail lookahead.
-            if active is not None:
+            if active is not None and decide_on_bar:
                 risk = abs(active.entry_price - active.sl1)
+                # FIX EXIT-01: Track target hits WITHOUT modifying TSL on the
+                # same bar. The old code raised TSL to +1R when high touched
+                # TP1, then _stop_fill fired on the same bar's low, killing
+                # winners at +0.5% instead of booking at TP1.
+                # FIX EXIT-03: Track t2_hit_this_bar to prevent momentum exit
+                # safeguard from being nullified.
+                t2_hit_before = active.t2_hit
+                # Track BOTH extremes on every trade regardless of direction.
+                # Previously peak_price was only updated inside the LONG branch
+                # and trough_price only inside the SHORT branch, so the
+                # opposite-direction column stayed pinned at entry_price for the
+                # life of the trade — making every MAE/MFE statistic derived
+                # from these columns meaningless (704/704 SELL rows had
+                # peak_price == entry_price, 985/985 BUY rows had
+                # trough_price == entry_price).
+                active.peak_price = max(active.peak_price, float(row["high"]))
+                active.trough_price = min(active.trough_price, float(row["low"]))
                 if active.direction == "LONG":
-                    active.peak_price = max(active.peak_price, float(row["high"]))
                     if float(row["high"]) >= active.tp1:
                         active.t1_hit = True
-                        if cfg.lock_at_t1 and not active.profit_locked and risk > EPS:
-                            active.tsl = max(active.tsl, active.entry_price + risk * 0.4)
-                            active.profit_locked = True
+                        # NOTE: TSL lock moved AFTER _stop_fill (line ~1900)
                     if float(row["high"]) >= active.tp2:
                         active.t2_hit = True
                     if float(row["high"]) >= active.tp3:
                         active.t3_hit = True
                 else:
-                    active.trough_price = min(active.trough_price, float(row["low"]))
                     if float(row["low"]) <= active.tp1:
                         active.t1_hit = True
-                        if cfg.lock_at_t1 and not active.profit_locked and risk > EPS:
-                            active.tsl = min(active.tsl, active.entry_price - risk * 0.4)
-                            active.profit_locked = True
+                        # NOTE: TSL lock moved AFTER _stop_fill (line ~1916)
                     if float(row["low"]) <= active.tp2:
                         active.t2_hit = True
                     if float(row["low"]) <= active.tp3:
@@ -1724,25 +2016,56 @@ class ApexScanner:
                             exit_price = open_px if open_px <= active.tp1 else active.tp1
                         exit_reason = "T1 Booked (User Target)"
 
+                    # The trailing stop, lock_at_t1 and the stepped profit guard
+                    # used to be skipped for trade_style == "intraday", which is
+                    # exactly the population the system actually trades. That
+                    # left an intraday trade with no way to bank an unrealised
+                    # gain: only the hard stop, a gap, or the 15:30 square-off.
+                    # An intraday trade needs a trail MORE than a swing trade.
                     if exit_price is None and cfg.use_trail and risk > EPS:
                         if active.direction == "LONG":
                             if cfg.lock_at_t1 and active.t1_hit and not active.profit_locked:
-                                active.tsl = max(active.tsl, active.entry_price + risk * 0.4)
+                                active.tsl = max(active.tsl, active.entry_price + risk * 1.0)
                                 active.profit_locked = True
                             current_rr = (float(row["close"]) - active.entry_price) / risk
                             if current_rr >= cfg.trail_start_r:
                                 loose = cfg.trail_mult * (1.5 if bool(row["high_volatility"]) and not active.t2_hit else 1.3 if active.t2_hit else 1.0)
                                 active.tsl = max(active.tsl, active.peak_price - float(row["atr"]) * loose)
+                                
+                            # FIX EXIT-04: Profit guard now uses ATR-based buffer
+                            # instead of 0.2% absolute which was too tight for
+                            # normal market noise.
+                            peak_pnl_pct = (active.peak_price - active.entry_price) / active.entry_price * 100.0
+                            if peak_pnl_pct >= 1.5:
+                                current_step = math.floor(peak_pnl_pct / 0.5) * 0.5
+                                step_price = active.entry_price * (1.0 + current_step / 100.0)
+                                locked_price = step_price - float(row["atr"])
+                                locked_price = max(locked_price, active.entry_price)  # Never lock below entry
+                                active.tsl = max(active.tsl, locked_price)
                         else:
                             if cfg.lock_at_t1 and active.t1_hit and not active.profit_locked:
-                                active.tsl = min(active.tsl, active.entry_price - risk * 0.4)
+                                active.tsl = min(active.tsl, active.entry_price - risk * 1.0)
                                 active.profit_locked = True
                             current_rr = (active.entry_price - float(row["close"])) / risk
                             if current_rr >= cfg.trail_start_r:
                                 loose = cfg.trail_mult * (1.5 if bool(row["high_volatility"]) and not active.t2_hit else 1.3 if active.t2_hit else 1.0)
                                 active.tsl = min(active.tsl, active.trough_price + float(row["atr"]) * loose)
+                                
+                            # FIX EXIT-04: Profit guard now uses ATR-based buffer (SHORT side)
+                            peak_pnl_pct = (active.entry_price - active.trough_price) / active.entry_price * 100.0
+                            if peak_pnl_pct >= 1.5:
+                                current_step = math.floor(peak_pnl_pct / 0.5) * 0.5
+                                step_price = active.entry_price * (1.0 - current_step / 100.0)
+                                locked_price = step_price + float(row["atr"])
+                                locked_price = min(locked_price, active.entry_price)  # Never lock above entry
+                                active.tsl = min(active.tsl, locked_price)
 
-                    # Momentum exit is evaluated at bar close.
+                    # Momentum exit is evaluated at bar close. Applies to every
+                    # style: an intraday trade whose thesis has broken should
+                    # not be held to the 15:30 square-off just because it is
+                    # intraday. (It remains suppressed below when exit_at_t1 is
+                    # on, which is a deliberate "run to target or stop" choice.)
+                    momentum_exit = False
                     if active.direction == "LONG":
                         met = int(bool(row["macd"] < row["macd_signal"] and row["macd_acc_bear"]))
                         met += int(bool(row["close"] < row["ema13"]))
@@ -1752,7 +2075,8 @@ class ApexScanner:
                             active.exit_confirmation_count += 1
                         elif row["close"] > row["ema9"]:
                             active.exit_confirmation_count = max(0, active.exit_confirmation_count - 1)
-                        momentum_exit = active.exit_confirmation_count >= cfg.exit_confirmation_bars and not (row["high"] > active.tp2 and not active.t2_hit)
+                        # FIX EXIT-03: Use t2_hit_before (state before this bar) to avoid nullifying safeguard
+                        momentum_exit = active.exit_confirmation_count >= cfg.exit_confirmation_bars and not (row["high"] > active.tp2 and not t2_hit_before)
                     else:
                         met = int(bool(row["macd"] > row["macd_signal"] and row["macd_acc_bull"]))
                         met += int(bool(row["close"] > row["ema13"]))
@@ -1762,7 +2086,8 @@ class ApexScanner:
                             active.exit_confirmation_count += 1
                         elif row["close"] < row["ema9"]:
                             active.exit_confirmation_count = max(0, active.exit_confirmation_count - 1)
-                        momentum_exit = active.exit_confirmation_count >= cfg.exit_confirmation_bars and not (row["low"] < active.tp2 and not active.t2_hit)
+                        # FIX EXIT-03: Use t2_hit_before (state before this bar) to avoid nullifying safeguard
+                        momentum_exit = active.exit_confirmation_count >= cfg.exit_confirmation_bars and not (row["low"] < active.tp2 and not t2_hit_before)
 
                     # In user target mode the position should run to the target
                     # or the stop only — momentum exits would defeat the point
@@ -1779,6 +2104,13 @@ class ApexScanner:
                         exit_price = raw_px * (1.0 - cfg.slippage_pct / 100.0 if active.direction == "LONG" else 1.0 + cfg.slippage_pct / 100.0)
                         exit_reason = "Momentum Exit"
 
+                    # Intraday trades force a square-off on the session's last
+                    # bar — the position is never carried overnight.
+                    if exit_price is None and active.trade_style == "intraday" and session_last_bar:
+                        exit_price = float(row["close"])
+                        exit_reason = "Intraday Square-Off (EOD)"
+                        exit_time_val = timestamp
+
                 if exit_price is not None:
                     if exit_reason != "Momentum Exit":
                         if active.direction == "LONG":
@@ -1788,6 +2120,14 @@ class ApexScanner:
                     risk = abs(active.entry_price - active.sl1)
                     pnl_pct = ((exit_price - active.entry_price) / active.entry_price * 100.0) if active.direction == "LONG" else ((active.entry_price - exit_price) / active.entry_price * 100.0)
                     pnl_r = ((exit_price - active.entry_price) / risk) if active.direction == "LONG" else ((active.entry_price - exit_price) / risk)
+                    # Deduct statutory round-trip charges so realized stats are
+                    # NET (comparable to a live account), not gross. Configurable;
+                    # 0.0 on CLI/research keeps historical gross behaviour.
+                    if cfg.round_trip_cost_pct > 0.0:
+                        pnl_pct -= cfg.round_trip_cost_pct
+                        risk_pct = (risk / active.entry_price * 100.0)
+                        if risk_pct > EPS:
+                            pnl_r -= cfg.round_trip_cost_pct / risk_pct
                     trade_record = TradeRecord(
                         symbol=symbol,
                         direction=active.direction,
@@ -1807,20 +2147,33 @@ class ApexScanner:
                         t3_hit=active.t3_hit,
                         option_type=active.option_type,
                         option_strike=active.option_strike,
+                        signal_score=active.signal_score,
+                        trade_style=active.trade_style,
+                        peak_price=active.peak_price,
+                        trough_price=active.trough_price,
+                        profit_locked=active.profit_locked,
+                        exit_confirmation_count=active.exit_confirmation_count,
+                        option_pnl_pct=estimate_option_pnl_pct(
+                            active.entry_price, float(pnl_pct), i - active.entry_bar + 1, cfg.timeframe,
+                        ),
                     )
                     trades.append(trade_record)
                     f.iat[i, f.columns.get_loc("exit_event")] = True
                     f.iat[i, f.columns.get_loc("exit_reason")] = exit_reason
                     f.iat[i, f.columns.get_loc("realized_pnl_pct")] = pnl_pct
                     f.iat[i, f.columns.get_loc("realized_pnl_r")] = pnl_r
+                    # daily_cum_loss_pct is a NET intraday drawdown, not a gross
+                    # loss tally. It previously accumulated abs(pnl_pct) on
+                    # losses only and was never credited with wins, so a day of
+                    # +4% / -2.5% still tripped a 2% "daily max loss".
+                    daily_cum_loss_pct = max(0.0, daily_cum_loss_pct - pnl_pct)
                     if pnl_pct > 0.0:
                         consecutive_losses = 0
                     else:
                         consecutive_losses += 1
-                        daily_cum_loss_pct += abs(pnl_pct)
                         max_consecutive_seen = max(max_consecutive_seen, consecutive_losses)
-                        if consecutive_losses >= cfg.max_consecutive_losses or daily_cum_loss_pct >= cfg.daily_max_loss_pct:
-                            pause_until_bar = max(pause_until_bar, i + cfg.circuit_pause_bars)
+                    if consecutive_losses >= cfg.max_consecutive_losses or daily_cum_loss_pct >= cfg.daily_max_loss_pct:
+                        pause_until_bar = max(pause_until_bar, i + cfg.circuit_pause_bars)
                     active = None
                     last_signal_state = 0
                     exited_this_bar = True
@@ -1844,7 +2197,14 @@ class ApexScanner:
                 curr_s = float(row["bull_score"] if row["bull_score"] > row["bear_score"] else row["bear_score"])
                 if curr_s >= last_signal_score * 1.15:
                     cooldown_ok = True
-            can_signal = cooldown_ok and i > pause_until_bar
+            # Trade-style entry gating: BTST enters only late in the session
+            # (to carry overnight); intraday never opens on the square-off bar.
+            style_allows_entry = True
+            if style_btst and tf_is_short:
+                style_allows_entry = bar_minutes >= btst_entry_after
+            elif style_intraday and session_last_bar:
+                style_allows_entry = False
+            can_signal = cooldown_ok and i > pause_until_bar and decide_on_bar and style_allows_entry
             f.iat[i, f.columns.get_loc("circuit_paused")] = i <= pause_until_bar
 
             buy_signal = (
@@ -1868,6 +2228,7 @@ class ApexScanner:
                     config=cfg,
                     high_volatility=bool(row["high_volatility"]),
                     trending=bool(row["is_trending"]),
+                    symbol=symbol,
                 )
                 planned = _planned_levels(row, is_long, float(row["close"]), cfg)
                 execute_bar = i + cfg.entry_delay_bars
@@ -1901,7 +2262,8 @@ class ApexScanner:
                     anchor_low = float(row["anchor_low_3"])
                     anchor_high = float(row["anchor_high_3"])
                     if all(np.isfinite(x) for x in (entry_price, anchor_low, anchor_high, row["atr"])):
-                        sl1, sl2, stop_mode = calculate_stops(is_long, entry_price, anchor_low, anchor_high, row, cfg)
+                        sl1, sl2, stop_mode, _ = calculate_stops(is_long, entry_price, anchor_low, anchor_high, row, cfg)
+                        # Targets from the CLAMPED stop — see _planned_levels.
                         tp1, tp2, tp3 = calculate_targets(is_long, entry_price, sl1, cfg)
                         active = ActiveTrade(
                             direction="LONG" if is_long else "SHORT",
@@ -1912,6 +2274,7 @@ class ApexScanner:
                             sl1=sl1, sl2=sl2, tsl=sl1,
                             tp1=tp1, tp2=tp2, tp3=tp3,
                             setup=setup, stop_mode=stop_mode,
+                            signal_score=float(signal_score),
                             option_type=option_type, option_strike=option_strike,
                             peak_price=entry_price, trough_price=entry_price,
                         )
@@ -1959,6 +2322,7 @@ class ApexScanner:
                 for col, value in state_values.items():
                     f.iat[i, f.columns.get_loc(col)] = value
             elif pending is not None:
+
                 f.iat[i, f.columns.get_loc("trade_state")] = "PENDING_LONG" if pending["is_long"] else "PENDING_SHORT"
             else:
                 f.iat[i, f.columns.get_loc("trade_state")] = "FLAT"
@@ -1968,7 +2332,14 @@ class ApexScanner:
         latest_row = f.iloc[-1]
         latest = self._latest_snapshot(symbol, profile, latest_row, active, pending, forecast, stats)
         output_frame = f if cfg.keep_full_history else f.tail(max(500, cfg.min_history_bars + 50)).copy()
-        trade_output = trades[-cfg.recent_trade_limit :] if cfg.recent_trade_limit > 0 else trades
+        # NOTE: this list is not merely a display convenience — scanner_engine's
+        # _process_db_state matches an open DB row to its exit by scanning it.
+        # Truncating to the last 20 meant any exit pushed out of that window
+        # could never be matched, and the open row was force-closed down the
+        # zombie path with pnl NULL instead (294 such rows in production).
+        # Keep enough history that a whole replay's exits stay reachable.
+        keep = max(cfg.recent_trade_limit, _MIN_TRADES_FOR_RECONCILIATION) if cfg.recent_trade_limit > 0 else 0
+        trade_output = trades[-keep:] if keep > 0 else trades
         return SymbolResult(
             symbol=symbol,
             instrument=profile,
@@ -2008,7 +2379,10 @@ class ApexScanner:
         opt_tp3 = math.nan
         if opt_type in ("CE", "PE") and not math.isnan(opt_strike) and opt_strike > 0:
             s_str = f"{int(opt_strike)}" if opt_strike.is_integer() else f"{opt_strike:.1f}"
-            opt_symbol = f"{profile.name} {s_str} {opt_type}"
+            # Use the TICKER, not profile.name — that is the instrument class
+            # label, so every NSE equity rendered as the untradable string
+            # "Stock 150 CE" and the underlying never appeared on the card.
+            opt_symbol = f"{str(symbol).replace('.NS', '').upper()} {s_str} {opt_type}"
             c_price = float(row.get("close", math.nan))
             if not math.isnan(c_price) and c_price > 0:
                 diff = (c_price - opt_strike) if opt_type == "CE" else (opt_strike - c_price)
@@ -2150,6 +2524,12 @@ class ApexScanner:
 # ---------------------------------------------------------------------------
 # Serialization, CSV and CLI helpers
 # ---------------------------------------------------------------------------
+
+
+# Floor on how many closed trades a SymbolResult carries back to the engine.
+# The engine reconciles open DB rows against this list, so it must comfortably
+# exceed the number of trades one replay window can produce.
+_MIN_TRADES_FOR_RECONCILIATION = 500
 
 
 def _json_default(obj: Any) -> Any:

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Save, RotateCcw, Loader2, Check, AlertTriangle } from "lucide-react";
+import { customFetch } from "@workspace/api-client-react";
 
 // The scanner settings endpoints are outside the generated OpenAPI client,
 // so this page talks to /api directly (same-origin via the Vite proxy).
@@ -36,6 +37,7 @@ type Settings = {
   trade_options_intraday: boolean;
   options_broker: string;
   options_stop_mode: string;
+  trade_style: "intraday" | "intraday_btst" | "all";
 };
 
 const ALL_TFS = ["15m", "1h", "4h", "1d"];
@@ -70,25 +72,18 @@ const DEFAULTS: Settings = {
   trade_options_intraday: true,
   options_broker: "upstox",
   options_stop_mode: "Delta-Translated",
+  trade_style: "all",
 };
 
 async function fetchSettings(): Promise<Settings> {
-  const r = await fetch("/api/settings");
-  if (!r.ok) throw new Error(`GET /api/settings ${r.status}`);
-  return r.json();
+  return customFetch("/api/settings");
 }
 
 async function saveSettings(body: Settings): Promise<{ settings: Settings }> {
-  const r = await fetch("/api/settings", {
+  return customFetch("/api/settings", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) {
-    const detail = await r.json().catch(() => ({}));
-    throw new Error(detail.detail || `POST /api/settings ${r.status}`);
-  }
-  return r.json();
 }
 
 function Card({ title, desc, children }: { title: string; desc?: string; children: React.ReactNode }) {
@@ -236,8 +231,22 @@ export default function SettingsPage() {
               })}
             </div>
             <p className="mt-2 text-[11px] text-muted-foreground">
-              Trade-type filtering (Intraday / Swing / BTST) lives on the Scanner tab chips — those are read live and do not need a save.
+              Trade-type filtering lives on the Scanner tab chips, but you can restrict which signals are taken globally below.
             </p>
+          </Card>
+
+          <Card title="Signal Style Limits" desc="Control what types of setups the scanner is allowed to trade. Note: Older active trades of a different style will continue to be managed through their stop losses regardless of this setting.">
+            <div className="flex flex-col gap-2">
+              <Segmented
+                value={form.trade_style}
+                onChange={(v) => set("trade_style", v)}
+                options={[
+                  { v: "intraday", label: "Intraday Only" },
+                  { v: "intraday_btst", label: "Intraday + BTST" },
+                  { v: "all", label: "Intraday + BTST + Swing (All)" },
+                ]}
+              />
+            </div>
           </Card>
 
           {/* 2. Stop-loss */}

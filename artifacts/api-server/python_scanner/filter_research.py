@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from apex_python_scanner import ApexConfig, ApexScanner
+from simulation_engine import simulate
 
 CACHE = Path(__file__).resolve().parent / "angel_cache"
 COST = 0.182
@@ -42,28 +43,6 @@ def load_cached(interval: str, limit: int):
         if len(frames) >= limit:
             break
     return frames
-
-
-def simulate(o, h, l, c, entry_idx, is_long, tp_pct, sl_pct, max_bars=200):
-    if entry_idx + 1 >= len(o):
-        return None
-    entry = float(o[entry_idx + 1])
-    if not np.isfinite(entry) or entry <= 0:
-        return None
-    sign = 1.0 if is_long else -1.0
-    tp = entry * (1 + sign * tp_pct / 100.0)
-    sl = entry * (1 - sign * sl_pct / 100.0)
-    for i in range(entry_idx + 1, min(entry_idx + 1 + max_bars, len(o))):
-        if is_long:
-            if o[i] <= sl: return (o[i] - entry) / entry * 100.0
-            if l[i] <= sl: return (sl - entry) / entry * 100.0
-            if h[i] >= tp: return (tp - entry) / entry * 100.0
-        else:
-            if o[i] >= sl: return (entry - o[i]) / entry * 100.0
-            if h[i] >= sl: return (entry - sl) / entry * 100.0
-            if l[i] <= tp: return (entry - tp) / entry * 100.0
-    last = float(c[min(entry_idx + max_bars, len(o) - 1)])
-    return sign * (last - entry) / entry * 100.0
 
 
 def build_dataset(limit: int) -> pd.DataFrame:
@@ -103,9 +82,17 @@ def build_dataset(limit: int) -> pd.DataFrame:
         for i in idx:
             i = int(i)
             is_long = sig[i] == "BUY"
-            out = simulate(o, h, l, c, i, is_long, TP, SL)
-            if out is None:
+            # Intraday trades must square off by EOD (15:30). Each 15m bar = 0.25h.
+            bars_to_eod = 200
+            h_val = hours[i]
+            if h_val < 15.5:
+                bars_to_eod = int(max(1, (15.5 - h_val) * 4)) - 1
+                if bars_to_eod <= 0:
+                    continue
+            sim_res = simulate(o, h, l, c, i, is_long, TP, SL, max_bars=bars_to_eod, deduct_costs=False)
+            if sim_res is None:
                 continue
+            out, _ = sim_res
             px = col["close"][i]
             rows.append({
                 "ts": f.index[i], "symbol": symbol, "is_long": is_long,

@@ -5,6 +5,7 @@ import NotFound from '@/pages/not-found';
 import { Route, Switch, Router as WouterRouter } from 'wouter';
 import { useEffect } from 'react';
 import { Shell } from '@/components/layout/Shell';
+import { ErrorBoundary } from '@/components/ErrorBoundary';
 
 import Dashboard from '@/pages/Dashboard';
 import Trades from '@/pages/Trades';
@@ -46,7 +47,9 @@ function App() {
       <TooltipProvider>
         <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
           <AppEffects />
-          <Router />
+          <ErrorBoundary>
+            <Router />
+          </ErrorBoundary>
         </WouterRouter>
         <Toaster />
       </TooltipProvider>

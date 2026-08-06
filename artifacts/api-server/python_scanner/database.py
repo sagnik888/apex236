@@ -90,13 +90,15 @@ def _migrate_sqlite_schema() -> None:
         "profit_locked": "BOOLEAN NOT NULL DEFAULT 0", "peak_price": "FLOAT",
         "trough_price": "FLOAT", "exit_confirmation_count": "INTEGER NOT NULL DEFAULT 0",
     }
+    try:
+        with engine.connect() as conn:
+            conn.execution_options(isolation_level="AUTOCOMMIT").execute(text("PRAGMA journal_mode=WAL;"))
+    except Exception:
+        pass
+        
     for attempt in range(5):
         try:
             with engine.begin() as conn:
-                try:
-                    conn.execute(text("PRAGMA journal_mode=WAL;"))
-                except Exception:
-                    pass
                 existing = {row[1] for row in conn.execute(text("PRAGMA table_info(trades)"))}
                 for name, definition in additions.items():
                     if name not in existing:
@@ -115,5 +117,9 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     finally:
         db.close()

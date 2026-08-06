@@ -55,6 +55,14 @@ _FETCH_CONFIG: dict[str, dict] = {
 _SESSION_ORIGIN = pd.Timestamp("2000-01-03 09:15:00", tz=IST)
 
 _BATCH_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
+_BATCH_CACHE_LIMIT = 2000
+
+def _enforce_cache_limit() -> None:
+    if len(_BATCH_CACHE) > _BATCH_CACHE_LIMIT:
+        # Remove the oldest 10% of entries based on timestamp
+        sorted_keys = sorted(_BATCH_CACHE.keys(), key=lambda k: _BATCH_CACHE[k][0])
+        for k in sorted_keys[:int(_BATCH_CACHE_LIMIT * 0.1)]:
+            _BATCH_CACHE.pop(k, None)
 
 _NSE_OPEN = dt_time(9, 15)
 _NSE_CLOSE = dt_time(15, 30)
@@ -71,6 +79,7 @@ _ANGEL_1H: dict[str, pd.DataFrame] = {}    # completed 1h candles per symbol
 _BOOTSTRAP_STATE = {"15m": "idle", "1h": "idle"}  # idle|running|ready|failed
 _BOOTSTRAP_EVENTS = {"15m": threading.Event(), "1h": threading.Event()}
 _HEAL_QUEUE: set[str] = set()
+_HEAL_LOCK = threading.Lock()
 _HEAL_THREAD: Optional[threading.Thread] = None
 _LAST_SCAN_SOURCE: dict[tuple[str, str], str] = {}   # (symbol, timeframe) -> "angel" | "yahoo"
 
@@ -97,7 +106,12 @@ def _cache_ttl_seconds(now: Optional[datetime] = None) -> int:
         trading_day = is_trading_day(now.date())
     except Exception:
         trading_day = now.weekday() < 5
-    return _LIVE_CACHE_TTL if trading_day and _NSE_OPEN <= local_time <= _NSE_CLOSE else _OFF_MARKET_CACHE_TTL
+    # FIX DATA-02: Add a 5-minute post-close buffer before relaxing the TTL.
+    # Otherwise, a 15:29:15 cache fetch is seen as "fresh" at 15:30:01 because
+    # the TTL jumps from 45s to 300s, leading to EOD scans on incomplete data.
+    from datetime import time
+    _nse_close_buffer = time(15, 35)
+    return _LIVE_CACHE_TTL if trading_day and _NSE_OPEN <= local_time <= _nse_close_buffer else _OFF_MARKET_CACHE_TTL
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -182,13 +196,45 @@ def _last_completed_15m_open(now: Optional[datetime] = None) -> Optional[pd.Time
     return pd.Timestamp(day_open + timedelta(minutes=(completed_buckets - 1) * 15))
 
 
+def drop_non_session_bars(frame: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Remove bars dated on a non-trading day from an OHLCV frame.
+
+    Brokers happily return candles for exchange MOCK / disaster-recovery
+    sessions (NSE ran them on Saturdays 2026-07-25 and 2026-08-01). Those bars
+    are a systems test, not a market: the 2026-08-01 mock printed RELIANCE
+    between 1270 and 1569 against a real 2026-07-31 close of 1305. Merged into
+    the store they inflated ATR(14) on the 1h series by a median 4.47x across
+    234 of 236 symbols, which pushed the raw ATR stop from ~1.28% to ~5.93% of
+    price and pinned every subsequent intraday trade against the stop clamp.
+
+    Applied to the MERGED result rather than only to new data, so an existing
+    contaminated store is cleaned on the next merge instead of persisting.
+    """
+    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+        return frame
+    try:
+        from market_calendar import is_ingestable
+    except Exception:  # calendar unavailable — do not silently drop real data
+        return frame
+    dates = pd.Series(frame.index.date, index=frame.index)
+    keep = dates.map(is_ingestable).to_numpy(dtype=bool)
+    if keep.all():
+        return frame
+    dropped = sorted({d for d, k in zip(dates.to_numpy(), keep) if not k})
+    logger.warning(
+        "Dropped %d non-session bar(s) from %s", int((~keep).sum()),
+        ", ".join(str(d) for d in dropped[:5]),
+    )
+    return frame[keep]
+
+
 def _merge_frames(base: Optional[pd.DataFrame], extra: pd.DataFrame) -> pd.DataFrame:
     if base is None or base.empty:
         merged = extra
     else:
         merged = pd.concat([base, extra])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
-    return merged
+    return drop_non_session_bars(merged)
 
 
 def _drop_forming_bucket(frame: pd.DataFrame, minutes: int) -> pd.DataFrame:
@@ -200,8 +246,10 @@ def _drop_forming_bucket(frame: pd.DataFrame, minutes: int) -> pd.DataFrame:
     if frame is None or frame.empty:
         return frame
     now = _now_ist()
-    last_open = frame.index[-1].to_pydatetime()
-    if last_open + timedelta(minutes=minutes) > now:
+    last_open_ts = pd.Timestamp(frame.index[-1])
+    if last_open_ts.tzinfo is None:
+        last_open_ts = last_open_ts.tz_localize(_IST_TZ)
+    if last_open_ts + pd.Timedelta(minutes=minutes) > pd.Timestamp(now):
         return frame.iloc[:-1]
     return frame
 
@@ -289,7 +337,8 @@ def _absorb_feed_candles(symbols: list[str]) -> None:
         with _ANGEL_LOCK:
             _ANGEL_15M[symbol] = _merge_frames(base, frame)
         # Tick-built candles are approximations — queue official re-fetch.
-        _HEAL_QUEUE.add(symbol)
+        with _HEAL_LOCK:
+            _HEAL_QUEUE.add(symbol)
         healed += 1
     if healed:
         _ensure_heal_thread()
@@ -306,8 +355,11 @@ def _detect_gaps(symbols: list[str]) -> None:
         if base is None or not len(base):
             continue
         if base.index[-1] < expected - pd.Timedelta(minutes=15):
-            _HEAL_QUEUE.add(symbol)
-    if _HEAL_QUEUE:
+            with _HEAL_LOCK:
+                _HEAL_QUEUE.add(symbol)
+    with _HEAL_LOCK:
+        has_heal = bool(_HEAL_QUEUE)
+    if has_heal:
         _ensure_heal_thread()
 
 
@@ -320,7 +372,8 @@ def _ensure_heal_thread() -> None:
         client = _angel_client()
         while True:
             try:
-                symbol = _HEAL_QUEUE.pop()
+                with _HEAL_LOCK:
+                    symbol = _HEAL_QUEUE.pop()
             except KeyError:
                 time.sleep(5)
                 continue
@@ -369,26 +422,23 @@ def _angel_15m_frame(symbol: str) -> Optional[pd.DataFrame]:
     forming = _forming_candle_row(symbol)
     if forming is not None:
         forming_start = forming.index[-1]
-        if forming_start >= frame.index[-1]:
-            overlap = frame.index >= forming_start
-            if overlap.any():
-                # A REST snapshot of the same bucket exists (e.g. the feed
-                # joined mid-candle). Union the two so no high/low/volume is
-                # lost: official open + widest range + max cumulative volume.
-                prior = frame.loc[overlap].iloc[-1]
-                forming.iloc[0, forming.columns.get_loc("open")] = prior["open"]
-                forming.iloc[0, forming.columns.get_loc("high")] = max(prior["high"], forming["high"].iloc[0])
-                forming.iloc[0, forming.columns.get_loc("low")] = min(prior["low"], forming["low"].iloc[0])
-                forming.iloc[0, forming.columns.get_loc("volume")] = max(prior["volume"], forming["volume"].iloc[0])
-                frame = frame.loc[~overlap]
+        # FIX DATA-01: Stale Tick Overwrites Official Close
+        # If the forming candle overlaps with an already fetched historical bar,
+        # it means the historical fetch already contains the definitive close for that bucket.
+        # Do not overwrite the official exchange close with a stale websocket LTP.
+        if forming_start > frame.index[-1]:
             frame = pd.concat([frame, forming])
     return frame.tail(700)
 
 
-def _resample_intraday(frame: pd.DataFrame, rule: str) -> pd.DataFrame:
+def _resample_intraday(frame: pd.DataFrame, rule: str, symbol: Optional[str] = None) -> pd.DataFrame:
     rs = frame.resample(rule, origin=_SESSION_ORIGIN, closed="left", label="left").agg(
         {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
     ).dropna(subset=["open", "high", "low", "close"])
+    
+    if symbol is not None and not symbol.endswith(".NS"):
+        return rs
+    
     return rs[rs.index.hour.isin(range(9, 16))]
 
 
@@ -397,7 +447,7 @@ def _angel_1h_frame(symbol: str, tail: int = 700) -> Optional[pd.DataFrame]:
         base = _ANGEL_1H.get(symbol)
         base = base.copy() if base is not None else None
     m15 = _angel_15m_frame(symbol)
-    live_1h = _resample_intraday(m15, "60min") if m15 is not None else None
+    live_1h = _resample_intraday(m15, "60min", symbol) if m15 is not None else None
     if base is not None and len(base) > 100:
         if live_1h is not None and len(live_1h):
             cutoff = base.index[-1] - pd.Timedelta(days=1)
@@ -421,7 +471,7 @@ def _angel_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         hourly = _angel_1h_frame(symbol, tail=2000)
         if hourly is None or len(hourly) < 100:
             return None
-        return _resample_intraday(hourly, "4h").tail(450)
+        return _resample_intraday(hourly, "4h", symbol).tail(450)
     return None
 
 
@@ -506,6 +556,47 @@ def prefetch_all_ohlcv(symbols: list[str], timeframes: list[str]) -> None:
         _yahoo_prefetch(symbols, yahoo_tfs)
 
 
+def _merge_upstox_forming(symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
+    """Append/union the live Upstox forming 15m candle onto a REST equity frame
+    so the Upstox-served half has the same current-session freshness as the
+    Angel half. Fully guarded: any index/timezone uncertainty safely no-ops.
+    """
+    try:
+        from broker_upstox import get_upstox_client
+        from upstox_feed import get_upstox_feed
+        info = get_upstox_client().resolve_symbol(symbol)
+        inst_key = info.get("instrument_key") if info else None
+        if not inst_key:
+            return frame
+        fc = get_upstox_feed().get_forming_candle(inst_key)
+        if not fc or frame.empty:
+            return frame
+        start = pd.Timestamp(fc["start"])
+        idx_tz = frame.index.tz
+        # Normalize the forming timestamp to the frame index's tz convention.
+        if idx_tz is not None:
+            start = start.tz_localize(idx_tz) if start.tzinfo is None else start.tz_convert(idx_tz)
+        elif start.tzinfo is not None:
+            start = start.tz_localize(None)
+        last = frame.index[-1]
+        row = {
+            "open": float(fc["open"]), "high": float(fc["high"]),
+            "low": float(fc["low"]), "close": float(fc["close"]),
+            "volume": float(fc.get("volume", 0.0)),
+        }
+        frame = frame.copy()
+        if start > last:
+            frame = pd.concat([frame, pd.DataFrame([row], index=pd.DatetimeIndex([start]))])
+        elif start == last:
+            frame.loc[last, "high"] = max(float(frame.loc[last, "high"]), row["high"])
+            frame.loc[last, "low"] = min(float(frame.loc[last, "low"]), row["low"])
+            frame.loc[last, "close"] = row["close"]
+            frame.loc[last, "volume"] = max(float(frame.loc[last, "volume"]), row["volume"])
+    except Exception as exc:
+        logger.debug("Upstox forming merge skipped for %s: %s", symbol, exc)
+    return frame
+
+
 def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     """OHLCV frame (IST bar-open index) for one symbol/timeframe, or None."""
     if timeframe not in _FETCH_CONFIG:
@@ -530,6 +621,10 @@ def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
             df, source = dispatcher.fetch_ohlcv(symbol, timeframe)
             if df is not None and len(df) >= 50:
                 _LAST_SCAN_SOURCE[(symbol, timeframe)] = source
+                # DQ-2: give the Upstox-served half the same current-session
+                # freshness as the Angel half by merging the live forming candle.
+                if source == "upstox" and timeframe == "15m":
+                    df = _merge_upstox_forming(symbol, df)
                 return df.copy()
         except Exception as exc:
             logger.warning("Dispatcher fetch failed %s/%s (%s); using Yahoo", symbol, timeframe, exc)
@@ -588,10 +683,26 @@ def _yahoo_prefetch(symbols: list[str], timeframes: list[str]) -> None:
                     period=period,
                     group_by="ticker",
                     threads=True,
-                    auto_adjust=True,
+                    # Raw (unadjusted) prices to match Angel/Upstox traded levels;
+                    # auto_adjust=True shifted historical levels around ex-dates
+                    # and made absolute SL/TP distances inconsistent with the
+                    # broker feeds used for the rest of the universe.
+                    auto_adjust=False,
                     progress=False,
                 )
                 if df_chunk is not None and not df_chunk.empty:
+                    if not isinstance(df_chunk.columns, pd.MultiIndex):
+                        sym = chunk[0] if len(chunk) == 1 else (getattr(df_chunk, "name", None))
+                        if not sym:
+                            import yfinance.shared as yf_shared
+                            failed = set(yf_shared._ERRORS.keys())
+                            succeeded = [s for s in chunk if s not in failed]
+                            if len(succeeded) == 1:
+                                sym = succeeded[0]
+                        if sym:
+                            df_chunk.columns = pd.MultiIndex.from_product([[sym], df_chunk.columns])
+                        else:
+                            continue
                     df_bulk = df_chunk if df_bulk.empty else pd.concat([df_bulk, df_chunk], axis=1)
                 if i + chunk_size < len(symbols):
                     time.sleep(1)
@@ -602,20 +713,7 @@ def _yahoo_prefetch(symbols: list[str], timeframes: list[str]) -> None:
         if df_bulk is None or df_bulk.empty:
             continue
 
-        if not isinstance(df_bulk.columns, pd.MultiIndex):
-            # Flat columns only happen when a single ticker succeeded. Cache it
-            # only when we know which one it was (exactly one requested).
-            if len(symbols) == 1:
-                sym = symbols[0]
-                for timeframe in cache_timeframes:
-                    _BATCH_CACHE[(sym, timeframe)] = (now, df_bulk.copy())
-                    alt = sym[:-3] if sym.endswith(".NS") else sym + ".NS"
-                    _BATCH_CACHE[(alt, timeframe)] = (now, df_bulk.copy())
-            else:
-                logger.warning("Yahoo returned flat columns for a %s-symbol batch; skipping cache", len(symbols))
-            continue
-
-        level0 = set(df_bulk.columns.levels[0])
+        level0 = set(df_bulk.columns.levels[0]) if isinstance(df_bulk.columns, pd.MultiIndex) else set()
         for sym in symbols:
             ticker_key = sym if sym in level0 else None
             if ticker_key is None and sym.endswith(".NS") and sym[:-3] in level0:
@@ -629,6 +727,7 @@ def _yahoo_prefetch(symbols: list[str], timeframes: list[str]) -> None:
                 if sym_df.empty:
                     continue
                 for timeframe in cache_timeframes:
+                    _enforce_cache_limit()
                     _BATCH_CACHE[(sym, timeframe)] = (now, sym_df)
                     alt = sym[:-3] if sym.endswith(".NS") else sym + ".NS"
                     _BATCH_CACHE[(alt, timeframe)] = (now, sym_df)
@@ -654,7 +753,7 @@ def _yahoo_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
 
     if raw is None or raw.empty:
         try:
-            raw = yf.Ticker(symbol).history(interval=cfg["interval"], period=cfg["period"], auto_adjust=True)
+            raw = yf.Ticker(symbol).history(interval=cfg["interval"], period=cfg["period"], auto_adjust=False)
             fetched_at = time.time()
         except Exception as exc:
             logger.warning("yfinance fetch failed for %s/%s: %s", symbol, timeframe, exc)
@@ -682,16 +781,17 @@ def _yahoo_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         df = df[~bad]
 
     if timeframe == "4h":
-        df = _resample_intraday(df, "4h")
+        df = _resample_intraday(df, "4h", symbol)
 
     if df.empty or len(df) < 50:
         return None
 
     # Preserve the ORIGINAL fetch time so TTL measures data age, not access age.
+    _enforce_cache_limit()
     _BATCH_CACHE[cache_key] = (fetched_at, df)
     return df.copy()
 
 
 def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
     """Backwards-compatible alias used by older tests."""
-    return _resample_intraday(df, "4h")
+    return _resample_intraday(df, "4h", None)

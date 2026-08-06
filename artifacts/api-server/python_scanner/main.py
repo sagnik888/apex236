@@ -21,6 +21,9 @@ from datetime import datetime
 
 from scanner_engine import ScannerEngine, get_market_status, scan_interval_secs, ist_now
 from nifty50 import TIMEFRAMES
+from concurrent.futures import ThreadPoolExecutor
+
+scanner_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bg-scanner")
 
 # Configure logging
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -69,7 +72,7 @@ async def _bg_scan_loop() -> None:
     for attempt in range(3):
         try:
             await asyncio.wait_for(
-                loop.run_in_executor(None, engine.run_all_scans, ["15m", "1h", "4h", "1d"]),
+                loop.run_in_executor(scanner_pool, engine.run_all_scans, ["15m", "1h", "4h", "1d"]),
                 timeout=360.0,
             )
             stats = engine.get_stats()
@@ -82,46 +85,62 @@ async def _bg_scan_loop() -> None:
 
     live_scan_counter = 0
     while True:
-        # Read the session immediately before sleeping only to choose the wait.
-        # It must be read again afterwards; otherwise a 09:14/15:30 boundary
-        # is processed using stale session data.
-        interval = scan_interval_secs()
+        try:
+            # Read the session immediately before sleeping only to choose the wait.
+            # It must be read again afterwards; otherwise a 09:14/15:30 boundary
+            # is processed using stale session data.
+            interval = scan_interval_secs()
 
-        logger.info(f"Next scan in {interval}s [session={get_market_status()['session_status']}]")
-        await asyncio.sleep(interval)
-        ms = get_market_status()
+            logger.info(f"Next scan in {interval}s [session={get_market_status()['session_status']}]")
+            await asyncio.sleep(interval)
+            ms = get_market_status()
 
-        if ms["market_open"]:
-            live_scan_counter += 1
-            # Do not expand each one-minute scan with active higher timeframes:
-            # that made every cycle take several minutes and delayed the next
-            # live 15m refresh. Higher-timeframe trailing is handled below.
-            timeframes = {"15m"}
-            if live_scan_counter % 5 == 0:
-                timeframes.update(["1h", "4h", "1d"])
-        else:
-            live_scan_counter = 0
-            timeframes = {"15m", "1h", "4h", "1d"}
-
-        for attempt in range(2):
+            # Reconcile any open option OCO pairs (cancel the sibling of a filled
+            # leg) before the next scan so no stale protective/target order lingers.
             try:
-                await asyncio.wait_for(
-                    loop.run_in_executor(None, engine.run_all_scans, list(timeframes)),
-                    timeout=300.0,
-                )
-                stats = engine.get_stats()
-                # Push main scan_complete first
-                await _push_to_all_clients({"type": "scan_complete", "stats": stats})
-                # Push individual notification events (new signals, TP/SL hits)
-                events = engine.pop_pending_events()
-                for evt in events:
-                    await _push_to_all_clients(evt)
-                if events:
-                    logger.info(f"Pushed {len(events)} notification event(s) to WS clients")
-                break
+                from options_engine import reconcile_open_ocos
+                oco_actions = await loop.run_in_executor(scanner_pool, reconcile_open_ocos)
+                if oco_actions:
+                    logger.info(f"OCO reconcile: {oco_actions}")
             except Exception as exc:
-                logger.error(f"Periodic scan attempt {attempt+1} error: {exc}")
-                await asyncio.sleep(1.5 * (attempt + 1))
+                logger.debug(f"OCO reconcile skipped: {exc}")
+
+            if ms["market_open"]:
+                live_scan_counter += 1
+                # Do not expand each one-minute scan with active higher timeframes:
+                # that made every cycle take several minutes and delayed the next
+                # live 15m refresh. Higher-timeframe trailing is handled below.
+                timeframes = {"15m"}
+                if live_scan_counter % 5 == 0:
+                    timeframes.update(["1h", "4h", "1d"])
+            else:
+                live_scan_counter = 0
+                timeframes = {"15m", "1h", "4h", "1d"}
+
+            for attempt in range(2):
+                try:
+                    await asyncio.wait_for(
+                        loop.run_in_executor(scanner_pool, engine.run_all_scans, list(timeframes)),
+                        timeout=300.0,
+                    )
+                    stats = engine.get_stats()
+                    # Push main scan_complete first
+                    await _push_to_all_clients({"type": "scan_complete", "stats": stats})
+                    # Push individual notification events (new signals, TP/SL hits)
+                    events = engine.pop_pending_events()
+                    for evt in events:
+                        await _push_to_all_clients(evt)
+                    if events:
+                        logger.info(f"Pushed {len(events)} notification event(s) to WS clients")
+                    break
+                except Exception as exc:
+                    logger.error(f"Periodic scan attempt {attempt+1} error: {exc}")
+                    await asyncio.sleep(1.5 * (attempt + 1))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"Fatal error in background scan loop: {exc}")
+            await asyncio.sleep(5.0)
 
 
 @asynccontextmanager
@@ -134,6 +153,7 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     finally:
+        scanner_pool.shutdown(wait=False, cancel_futures=True)
         engine.shutdown()
 
 
@@ -334,21 +354,22 @@ async def update_settings_endpoint(request: Request):
         body = await request.json()
         if not isinstance(body, dict):
             raise ValueError("Body must be a JSON object")
-        merged = update_settings(body)
-    except ValueError as exc:
+        loop = asyncio.get_running_loop()
+        merged = await loop.run_in_executor(scanner_pool, update_settings, body)
+    except Exception as exc:
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
     # Refresh results with the new parameters without waiting for the cycle.
     if not engine.get_stats()["scanning"]:
         loop = asyncio.get_running_loop()
-        asyncio.ensure_future(loop.run_in_executor(None, engine.run_all_scans))
+        asyncio.ensure_future(loop.run_in_executor(scanner_pool, engine.run_all_scans))
     return {"settings": merged, "applied": "next scan (triggered now if idle)"}
 
 
 @app.get("/api/history")
 @limiter.limit("30/minute")
-def get_history(request: Request, limit: int = Query(300, ge=1, le=1000)):
+def get_history(request: Request, limit: int = Query(300, ge=1, le=1000), symbol: Optional[str] = Query(None, description="Filter by symbol (e.g. INDIANB)"), timeframe: Optional[str] = Query(None, description="Filter by timeframe (e.g. 15m, 1h, 4h, 1d)")):
     """Closed-trade log (exits, stop-loss, target hits) for the History tab."""
-    return engine.get_history(limit=limit)
+    return engine.get_history(limit=limit, symbol=symbol, timeframe=timeframe)
 
 
 @app.post("/api/scan", dependencies=[Depends(_check_auth)])
@@ -366,7 +387,7 @@ async def trigger_scan(request: Request):
     async def _run_and_push():
         try:
             await asyncio.wait_for(
-                loop.run_in_executor(None, engine.run_all_scans),
+                loop.run_in_executor(scanner_pool, engine.run_all_scans),
                 timeout=300.0,
             )
             stats = engine.get_stats()
