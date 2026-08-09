@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Save, RotateCcw, Loader2, Check, AlertTriangle } from "lucide-react";
 import { customFetch } from "@workspace/api-client-react";
+import BrokerAuthPanel from "../components/brokers/BrokerAuthPanel";
 
 // The scanner settings endpoints are outside the generated OpenAPI client,
 // so this page talks to /api directly (same-origin via the Vite proxy).
@@ -211,6 +212,10 @@ export default function SettingsPage() {
             <AlertTriangle className="h-4 w-4" /> {(mutation.error as Error).message}
           </div>
         )}
+
+        <div className="mb-6">
+          <BrokerAuthPanel />
+        </div>
 
         <div className="grid gap-4">
           {/* 1. Timeframes */}
