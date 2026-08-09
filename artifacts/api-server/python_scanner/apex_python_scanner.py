@@ -2574,13 +2574,22 @@ class ApexScanner:
                 theta_for_calc = real_theta if not math.isnan(real_theta) else None
                 gamma_for_calc = real_gamma if not math.isnan(real_gamma) else None
 
+                # Timeframe-based SL range (% of premium) for clamping
+                tf_key = self.config.timeframe or "1h"
+                _SL_RANGES = {
+                    "15m": (0.10, 0.15),   # 10-15% intraday scalp
+                    "1h":  (0.12, 0.18),   # 12-18% short-term intraday
+                    "4h":  (0.18, 0.25),   # 18-25% positional / BTST
+                    "1d":  (0.25, 0.35),   # 25-35% swing
+                }
+                sl_min_pct, sl_max_pct = _SL_RANGES.get(tf_key, (0.12, 0.20))
+
                 # Calculate SL/TP using the proper engine when possible
                 if not math.isnan(cash_sl1) and not math.isnan(cash_tp1):
                     try:
                         from options_engine import calculate_option_stops
                         _bars_per_hold = {"15m": 6, "1h": 5, "4h": 4, "1d": 5}
                         _bar_days = {"15m": 15 / 375.0, "1h": 60 / 375.0, "4h": 240 / 375.0, "1d": 1.0}
-                        tf_key = str(row.get("timeframe", "1h"))
                         holding_days = _bars_per_hold.get(tf_key, 6) * _bar_days.get(tf_key, 0.1)
                         opt_sl1, opt_tp1 = calculate_option_stops(
                             entry_option=opt_entry,
@@ -2592,25 +2601,34 @@ class ApexScanner:
                             option_theta=theta_for_calc,
                             option_gamma=gamma_for_calc,
                             holding_days=holding_days,
+                            timeframe=tf_key,
                         )
                     except Exception:
-                        # Fallback: simple delta translation with 25% SL floor
-                        min_sl = opt_entry * 0.25
-                        opt_sl1 = round(max(min_sl, opt_entry - abs(c_price - cash_sl1) * delta), 2)
+                        # Fallback: simple delta translation clamped to timeframe SL range
+                        raw_dist = abs(c_price - cash_sl1) * delta
+                        raw_pct = raw_dist / opt_entry if opt_entry > 0 else 0.15
+                        clamped_pct = max(sl_min_pct, min(sl_max_pct, raw_pct))
+                        opt_sl1 = round(opt_entry * (1.0 - clamped_pct), 2)
                         opt_tp1 = round(opt_entry + abs(cash_tp1 - c_price) * delta, 2)
                 else:
                     if not math.isnan(cash_sl1):
-                        min_sl = opt_entry * 0.25
-                        opt_sl1 = round(max(min_sl, opt_entry - abs(c_price - cash_sl1) * delta), 2)
+                        raw_dist = abs(c_price - cash_sl1) * delta
+                        raw_pct = raw_dist / opt_entry if opt_entry > 0 else 0.15
+                        clamped_pct = max(sl_min_pct, min(sl_max_pct, raw_pct))
+                        opt_sl1 = round(opt_entry * (1.0 - clamped_pct), 2)
                     if not math.isnan(cash_tp1):
                         opt_tp1 = round(opt_entry + abs(cash_tp1 - c_price) * delta, 2)
 
                 if not math.isnan(cash_sl2):
-                    min_sl = opt_entry * 0.25
-                    opt_sl2 = round(max(min_sl, opt_entry - abs(c_price - cash_sl2) * delta), 2)
+                    raw_dist = abs(c_price - cash_sl2) * delta
+                    raw_pct = raw_dist / opt_entry if opt_entry > 0 else 0.15
+                    clamped_pct = max(sl_min_pct, min(sl_max_pct + 0.05, raw_pct))  # sl2 gets 5% more room
+                    opt_sl2 = round(opt_entry * (1.0 - clamped_pct), 2)
                 if not math.isnan(cash_tsl):
-                    min_sl = opt_entry * 0.25
-                    opt_tsl = round(max(min_sl, opt_entry - abs(c_price - cash_tsl) * delta), 2)
+                    raw_dist = abs(c_price - cash_tsl) * delta
+                    raw_pct = raw_dist / opt_entry if opt_entry > 0 else 0.10
+                    clamped_pct = max(sl_min_pct * 0.8, min(sl_max_pct, raw_pct))  # TSL slightly tighter
+                    opt_tsl = round(opt_entry * (1.0 - clamped_pct), 2)
                 if not math.isnan(cash_tp2):
                     opt_tp2 = round(opt_entry + abs(cash_tp2 - c_price) * delta, 2)
                 if not math.isnan(cash_tp3):

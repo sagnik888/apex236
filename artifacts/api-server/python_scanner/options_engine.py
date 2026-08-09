@@ -390,84 +390,87 @@ def calculate_option_stops(
     option_theta: Optional[float] = None,
     option_gamma: Optional[float] = None,
     holding_days: float = 0.0,
+    timeframe: str = "",
 ) -> tuple[float, float]:
-    """Compute precision option stop-loss (`SL_opt`) and take-profit (`TP_opt`).
+    """Compute option SL and TP using delta-translation clamped to practical
+    premium-percentage limits per timeframe.
 
-    A pure delta translation is theta-blind: over a multi-bar/-day hold the
-    premium bleeds from time decay, so a fixed premium stop is hit by the
-    passage of time while the underlying is still between its cash stop and
-    target. We add a decay buffer so a purely time-driven move does not trip the
-    stop, and we keep the risk cap symmetric so it does not silently improve the
-    modeled reward:risk.
-    
-    H-02: Taylor series expansion with Gamma to account for Delta convexity.
+    The delta-translated stop gives mathematically precise Greeks-aware levels,
+    but in practice option premiums are volatile and the delta/gamma model can
+    produce extreme values. We clamp the result to realistic SL ranges:
+
+        15m : 10-15% of premium  (tight intraday scalp)
+        1h  : 12-18% of premium  (short-term intraday)
+        4h  : 18-25% of premium  (positional / BTST)
+        1d  : 25-35% of premium  (swing / multi-day)
+
+    Target is computed as delta-translated distance, with a minimum 2:1 R:R
+    floor so no trade fires with risk > reward.
     """
     if entry_option <= 0:
         return 0.05, 0.10
 
-    # Expected time decay over the holding horizon (premium points). If theta is
-    # unknown, approximate ATM decay at ~1.5% of premium per day held.
-    theta_mag = abs(option_theta) if option_theta else entry_option * 0.015
-    decay_buffer = max(0.0, theta_mag * max(0.0, holding_days))
+    # ── Timeframe-based SL range (% of premium) ──────────────────────────
+    # These are the practical SL ranges real intraday/swing option traders use.
+    _SL_RANGES = {
+        "15m": (0.10, 0.15),   # 10-15% max SL for scalps
+        "1h":  (0.12, 0.18),   # 12-18% for short-term intraday
+        "4h":  (0.18, 0.25),   # 18-25% for positional / BTST
+        "1d":  (0.25, 0.35),   # 25-35% for swing
+    }
+    sl_min_pct, sl_max_pct = _SL_RANGES.get(timeframe, (0.12, 0.20))
 
-    # Cap the decay buffer so the SL never collapses below 40% of entry premium.
-    # Without this, a 4h/1d hold would have theta eating through the entire SL
-    # range, leaving SL at Rs 0.05 (effectively zero protection). The remaining
-    # 40% floor gives the option meaningful downside protection even on multi-day
-    # holds while still accounting for time decay.
-    max_decay = entry_option * 0.25  # decay can eat at most 25% of premium
-    decay_buffer = min(decay_buffer, max_decay)
-
-    if stop_mode in ("Option-ATR", "Option ATR") and option_atr and option_atr > 0:
-        sl_opt = max(0.05, entry_option - (1.5 * option_atr) - decay_buffer)
-        tp_opt = entry_option + (3.0 * option_atr)
-        return round(sl_opt, 2), round(tp_opt, 2)
-
-    # Delta-Translated calculation.
-    # A delta below 0.1 is a REAL measurement of a far-OTM contract, not a bad
-    # reading. Substituting 0.5 for it overstated the contract's responsiveness
-    # by 5x-100x and did so precisely on the strikes most likely to be wrong.
-    # Only fall back when the field is genuinely absent or nonsensical.
+    # ── Delta-Translated calculation (gives raw distance) ────────────────
     raw_delta = abs(option_delta) if option_delta else 0.0
     if 0.0 < raw_delta <= 0.95:
         delta = raw_delta
     else:
         delta = 0.5
-        if raw_delta > 0.95:
-            logger.warning("Implausible option delta %.3f; falling back to 0.5", raw_delta)
     gamma = abs(option_gamma) if option_gamma else 0.0
-    
+
     spot_sl_dist = abs(entry_spot - stop_spot)
     spot_tp_dist = abs(target_spot - entry_spot)
 
-    # Taylor series expansion for option price change: dO = dS*Delta + 0.5*Gamma*(dS)^2
-    # C2-06: Cap gamma adjustment to prevent overflow on wide stops
+    # Taylor series: dO = dS*Delta + 0.5*Gamma*(dS)^2
     gamma_adj_sl = min(0.5 * gamma * (spot_sl_dist ** 2), 0.5 * delta * spot_sl_dist)
     gamma_adj_tp = min(0.5 * gamma * (spot_tp_dist ** 2), 0.5 * delta * spot_tp_dist)
-    opt_sl_dist = (spot_sl_dist * delta) - gamma_adj_sl
-    opt_tp_dist = (spot_tp_dist * delta) + gamma_adj_tp
-    
-    # Ensure calculated distances are at least mildly positive
-    opt_sl_dist = max(0.01, opt_sl_dist)
-    opt_tp_dist = max(0.01, opt_tp_dist)
+    opt_sl_dist_raw = max(0.01, (spot_sl_dist * delta) - gamma_adj_sl)
+    opt_tp_dist_raw = max(0.01, (spot_tp_dist * delta) + gamma_adj_tp)
 
-    # Symmetric risk cap: if the delta-translated stop would wipe more than 60%
-    # of premium, cap it AND scale the target by the same factor so the modeled
-    # reward:risk is preserved rather than inflated by a one-sided cap.
-    max_risk = entry_option * 0.60
-    if opt_sl_dist > max_risk > 0:
-        scale = max_risk / opt_sl_dist
-        opt_sl_dist = max_risk
-        opt_tp_dist *= scale
+    # ── Theta decay buffer (capped to 5% of premium) ────────────────────
+    theta_mag = abs(option_theta) if option_theta else entry_option * 0.015
+    decay_buffer = min(theta_mag * max(0.0, holding_days), entry_option * 0.05)
 
-    # Give the stop room for expected decay so time alone does not stop us out.
+    # ── Clamp SL to timeframe-appropriate range ──────────────────────────
+    # The delta-translated SL distance as % of premium
+    raw_sl_pct = opt_sl_dist_raw / entry_option if entry_option > 0 else 0.15
+
+    if raw_sl_pct < sl_min_pct:
+        # Delta says SL is too tight — widen to minimum
+        opt_sl_dist = entry_option * sl_min_pct
+    elif raw_sl_pct > sl_max_pct:
+        # Delta says SL is too wide — cap to maximum
+        opt_sl_dist = entry_option * sl_max_pct
+    else:
+        # Delta-translated value is within range — use it
+        opt_sl_dist = opt_sl_dist_raw
+
+    # Scale TP proportionally if we clamped SL, to preserve modeled R:R
+    if opt_sl_dist_raw > 0:
+        scale = opt_sl_dist / opt_sl_dist_raw
+        opt_tp_dist = opt_tp_dist_raw * scale
+    else:
+        opt_tp_dist = opt_tp_dist_raw
+
+    # ── Ensure minimum 2:1 R:R ──────────────────────────────────────────
+    if opt_tp_dist < opt_sl_dist * 2.0:
+        opt_tp_dist = opt_sl_dist * 2.0
+
+    # ── Final SL/TP prices ──────────────────────────────────────────────
     sl_opt = entry_option - opt_sl_dist - decay_buffer
-
-    # Hard floor: SL must retain at least 25% of entry premium so trades always
-    # have meaningful downside protection. The old Rs 0.05 floor was effectively
-    # zero and let 98% of premium evaporate before triggering.
-    min_sl = entry_option * 0.25
-    sl_opt = max(min_sl, sl_opt)
+    # Hard floor: never go below entry * (1 - sl_max_pct - 5% decay)
+    absolute_floor = entry_option * (1.0 - sl_max_pct - 0.05)
+    sl_opt = max(absolute_floor, sl_opt)
 
     tp_opt = entry_option + opt_tp_dist
     return round(sl_opt, 2), round(tp_opt, 2)
@@ -599,6 +602,7 @@ def execute_option_trade(
         option_theta=theta,
         option_gamma=gamma,
         holding_days=holding_days,
+        timeframe=timeframe,
     )
 
     # Execute via MultiBrokerDispatcher directly to Upstox
