@@ -1,7 +1,3 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
-
 """Is the stop destroying a real edge, or is there no edge at all?
 
 The forward-return test found Breakout signals gained +0.28% over drift on an
@@ -14,7 +10,12 @@ no stop, no target), net of costs, with the same train/test split. If
 time-exits are profitable out-of-sample, the edge is real and the risk model
 is the problem. If not, there is no edge to protect.
 """
+
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
 
 import sys
 from pathlib import Path
@@ -24,7 +25,9 @@ import pandas as pd
 
 from apex_python_scanner import ApexConfig, ApexScanner
 
-CACHE = Path(__file__).resolve().parent / "angel_cache"
+CACHE = Path(__file__).resolve().parent.parent / "python_scanner" / "angel_cache"
+if not CACHE.exists():
+    raise SystemExit(f"cache directory not found: {CACHE}")
 COST = 0.182
 TRAIN_FRAC = 0.65
 

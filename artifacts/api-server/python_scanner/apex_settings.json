@@ -5,6 +5,18 @@
         "4h",
         "1d"
     ],
+    "enabled_indices": [
+        "NIFTY50",
+        "NEXT50",
+        "MIDCAP150",
+        "SMALLCAP250"
+    ],
+    "signal_buffer_minutes": {
+        "15m": 1,
+        "1h": 5,
+        "4h": 15,
+        "1d": 30
+    },
     "min_score": 60.0,
     "conflict_margin": 20.0,
     "min_adx": 20.0,

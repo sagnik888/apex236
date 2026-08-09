@@ -56,6 +56,7 @@ _SESSION_ORIGIN = pd.Timestamp("2000-01-03 09:15:00", tz=IST)
 
 _BATCH_CACHE: dict[tuple[str, str], tuple[float, pd.DataFrame]] = {}
 _BATCH_CACHE_LIMIT = 2000
+_CHAIN_CACHE: dict[tuple[str, Optional[str]], tuple[float, list[dict]]] = {}
 
 def _enforce_cache_limit() -> None:
     if len(_BATCH_CACHE) > _BATCH_CACHE_LIMIT:
@@ -597,6 +598,117 @@ def _merge_upstox_forming(symbol: str, frame: pd.DataFrame) -> pd.DataFrame:
     return frame
 
 
+# Timeframes on which the 15-minute Yahoo delay is tolerable. Intraday
+# decisions must never be taken on delayed data.
+YAHOO_MACRO_TIMEFRAMES = ("4h", "1d")
+
+_TF_SECONDS = {"15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
+
+
+def is_frame_fresh(frame: Optional[pd.DataFrame], timeframe: str,
+                   now: Optional[datetime] = None) -> bool:
+    """Is this frame recent enough to make a trading decision on?
+
+    The only acceptance test in the read path was `len(frame) >= 50`, and
+    _load_pickle_if_fresh accepted a pickle up to three calendar days old. A
+    stale frame's last bar is not "forming", so the engine treated a days-old
+    bar as the current decision bar and evaluated live stops against it.
+
+    Tolerance is 2 bar-durations during a live session; outside a session the
+    newest bar legitimately dates from the last close, so only the staleness
+    that would span a whole extra session is rejected.
+    """
+    if frame is None or frame.empty or not isinstance(frame.index, pd.DatetimeIndex):
+        return False
+    now = now or _now_ist()
+    last = pd.Timestamp(frame.index[-1])
+    last = last.tz_localize(_IST_TZ) if last.tzinfo is None else last.tz_convert(_IST_TZ)
+    age = (pd.Timestamp(now) - last).total_seconds()
+
+    bar = _TF_SECONDS.get(timeframe, 900)
+    try:
+        from scanner_engine import get_market_status
+        live = bool(get_market_status(now)["market_open"])
+    except Exception:
+        live = False
+    tolerance = (2 * bar) if live else max(4 * bar, 4 * 86400)
+    return age <= tolerance
+
+
+def complete_daily_from_intraday(symbol: str, daily: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Append/repair recent daily bars using the broker intraday store.
+
+    Yahoo's daily feed lags: for a session that has already closed it can still
+    publish the bar with `Close = NaN` (Open/High/Low populated). A row with no
+    close is unusable and is correctly dropped, so the daily chart silently
+    stops at the PREVIOUS session — measured on 2026-08-08, RELIANCE's 1d chart
+    ended Thursday 06-Aug while 15m/1h/4h all correctly showed Friday 07-Aug.
+    That is the "1-2 day stale chart".
+
+    The session is already fully described by the Angel intraday store, so the
+    daily bar is reconstructed from it rather than waiting for Yahoo. Verified
+    against Yahoo's own partial row for 2026-08-07: reconstructed
+    O/H/L = 1320.00/1337.00/1316.60 matched to the cent, and supplied the
+    missing close of 1334.80.
+
+    Bars are anchored to IST midnight to match the existing daily index.
+    """
+    if daily is None or daily.empty:
+        return daily
+    # In-memory store first, then the on-disk pickle. The store is only
+    # populated once _bootstrap_interval has run, so a freshly restarted
+    # process would otherwise skip the repair and serve a stale daily chart
+    # for the whole first cycle.
+    intraday = None
+    try:
+        intraday = _angel_fetch(symbol, "15m")
+    except Exception:
+        intraday = None
+    if intraday is None or intraday.empty:
+        try:
+            intraday = _load_pickle_if_fresh(symbol, "15m")
+        except Exception:
+            intraday = None
+    if intraday is None or intraday.empty:
+        return daily
+    intraday = drop_non_session_bars(intraday)
+    if intraday is None or intraday.empty:
+        return daily
+
+    sessions = (
+        intraday.groupby(intraday.index.date)
+        .agg(open=("open", "first"), high=("high", "max"), low=("low", "min"),
+             close=("close", "last"), volume=("volume", "sum"))
+    )
+    if sessions.empty:
+        return daily
+
+    sessions.index = pd.DatetimeIndex(
+        [pd.Timestamp(d).tz_localize(_IST_TZ) for d in sessions.index]
+    )
+    # Only trust a session the intraday store actually completed, so a
+    # mid-session partial day never masquerades as a closed daily bar.
+    try:
+        from market_calendar import is_trading_day
+        sessions = sessions[[is_trading_day(d.date()) for d in sessions.index]]
+    except Exception:
+        pass
+
+    last_valid = daily.index[-1]
+    missing = sessions[sessions.index > last_valid]
+    if missing.empty:
+        return daily
+
+    merged = pd.concat([daily, missing[_OHLCV_COLS]])
+    merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    logger.info(
+        "Rebuilt %d daily bar(s) for %s from the intraday store (Yahoo had not "
+        "published a usable close): %s",
+        len(missing), symbol, ", ".join(str(d.date()) for d in missing.index),
+    )
+    return merged
+
+
 def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
     """OHLCV frame (IST bar-open index) for one symbol/timeframe, or None."""
     if timeframe not in _FETCH_CONFIG:
@@ -611,15 +723,21 @@ def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
             try:
                 frame = _angel_fetch(symbol, timeframe)
                 if frame is not None and len(frame) >= 50:
-                    _LAST_SCAN_SOURCE[(symbol, timeframe)] = "angel"
-                    return frame.copy()
+                    if not is_frame_fresh(frame, timeframe):
+                        logger.warning(
+                            "Angel store for %s/%s is stale (last bar %s); not trading on it.",
+                            symbol, timeframe, frame.index[-1],
+                        )
+                    else:
+                        _LAST_SCAN_SOURCE[(symbol, timeframe)] = "angel"
+                        return frame.copy()
             except Exception as exc:
                 logger.debug("Angel cache check failed for %s/%s: %s", symbol, timeframe, exc)
 
         # Delegate to MultiBrokerDispatcher failover (Upstox / Angel REST API)
         try:
             df, source = dispatcher.fetch_ohlcv(symbol, timeframe)
-            if df is not None and len(df) >= 50:
+            if df is not None and len(df) >= 50 and is_frame_fresh(df, timeframe):
                 _LAST_SCAN_SOURCE[(symbol, timeframe)] = source
                 # DQ-2: give the Upstox-served half the same current-session
                 # freshness as the Angel half by merging the live forming candle.
@@ -629,10 +747,32 @@ def fetch_ohlcv(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         except Exception as exc:
             logger.warning("Dispatcher fetch failed %s/%s (%s); using Yahoo", symbol, timeframe, exc)
 
-    frame = _yahoo_fetch(symbol, timeframe)
-    if frame is not None:
-        _LAST_SCAN_SOURCE[(symbol, timeframe)] = "yahoo"
-    return frame
+    # Yahoo is 15 MINUTES DELAYED. It is a legitimate source for the macro
+    # timeframes (4h/1d), where a 15-minute lag is a small fraction of a bar,
+    # and it is NOT acceptable for a 15m or 1h entry decision — a 15m bar is
+    # entirely stale by the time Yahoo publishes it, so the scanner would be
+    # entering on prices that no longer exist.
+    #
+    # This used to be an unconditional final fallback with no timeframe guard,
+    # so whenever both brokers failed the engine silently traded delayed data
+    # and the operator-facing warning was suppressed at the same moment.
+    if timeframe in YAHOO_MACRO_TIMEFRAMES:
+        frame = _yahoo_fetch(symbol, timeframe)
+        if frame is not None:
+            # Yahoo's daily bar for a just-closed session can carry a NaN close,
+            # which is dropped as unusable and leaves the daily chart a day or
+            # two behind. Rebuild those bars from the intraday store.
+            if timeframe == "1d":
+                frame = complete_daily_from_intraday(symbol, frame)
+            _LAST_SCAN_SOURCE[(symbol, timeframe)] = "yahoo"
+        return frame
+
+    _LAST_SCAN_SOURCE[(symbol, timeframe)] = "none"
+    logger.warning(
+        "No broker data for %s/%s and Yahoo is delayed — refusing to serve a "
+        "stale frame for an intraday decision.", symbol, timeframe,
+    )
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -795,3 +935,98 @@ def _yahoo_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
 def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
     """Backwards-compatible alias used by older tests."""
     return _resample_intraday(df, "4h", None)
+
+def fetch_options_chain(symbol: str, expiry: Optional[str] = None) -> list[dict]:
+    """Get full options chain from Upstox instrument master."""
+    cache_key = (symbol, expiry)
+    now = time.time()
+    
+    if cache_key in _CHAIN_CACHE:
+        cached_time, cached_data = _CHAIN_CACHE[cache_key]
+        if now - cached_time < 300.0:  # Cache for 5 minutes
+            return cached_data
+
+    try:
+        from broker_upstox import get_upstox_client, _parse_expiry
+        client = get_upstox_client()
+        _, fo_index = client.instrument_map()
+        base = symbol.replace(".NS", "").replace("^NSEI", "NIFTY").replace("^NSEBANK", "BANKNIFTY").replace("NIFTY 50", "NIFTY").upper()
+        contracts = fo_index.get(base, [])
+        if not contracts:
+            return []
+        
+        options = [c for c in contracts if str(c.get("instrument_type", "")).upper() in ("CE", "PE")]
+        if not options:
+            return []
+            
+        now_date = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        valid = []
+        for c in options:
+            exp_dt = _parse_expiry(c.get("expiry"))
+            if exp_dt is not None and exp_dt >= now_date:
+                valid.append((exp_dt, c))
+                
+        valid.sort(key=lambda x: x[0])
+        if not valid:
+            return []
+            
+        if expiry:
+            target_expiry = expiry
+        else:
+            target_expiry = valid[0][0].strftime("%Y-%m-%d")
+            
+        chain_contracts = []
+        instrument_keys = []
+        for exp_dt, c in valid:
+            if exp_dt.strftime("%Y-%m-%d") == target_expiry:
+                chain_contracts.append(c)
+                if c.get("instrument_key"):
+                    instrument_keys.append(c.get("instrument_key"))
+                
+        quotes = client.get_quote(instrument_keys)
+        
+        chain = []
+        for c in chain_contracts:
+            ik = c.get("instrument_key")
+            q = quotes.get(ik, {}) if ik else {}
+            greeks = q.get("option_greeks") or q.get("greeks") or {}
+            
+            chain.append({
+                "instrument_key": ik,
+                "trading_symbol": c.get("trading_symbol"),
+                "strike": float(c.get("strike_price") or 0.0),
+                "type": c.get("instrument_type"),
+                "expiry": target_expiry,
+                "ltp": float(q.get("last_price") or q.get("ltp") or 0.0),
+                "oi": float(q.get("oi") or 0.0),
+                "delta": float(greeks.get("delta") or 0.0),
+                "theta": float(greeks.get("theta") or 0.0),
+                "gamma": float(greeks.get("gamma") or 0.0),
+                "vega": float(greeks.get("vega") or 0.0),
+                "iv": float(greeks.get("iv") or 0.0),
+            })
+            
+        _CHAIN_CACHE[cache_key] = (now, chain)
+        return chain
+    except Exception as exc:
+        logger.error(f"Error fetching options chain for {symbol}: {exc}")
+        return []
+
+def fetch_option_greeks(instrument_key: str) -> dict:
+    """Get real-time Greeks from Upstox market quote."""
+    try:
+        from broker_upstox import get_upstox_client
+        client = get_upstox_client()
+        quotes = client.get_quote([instrument_key])
+        q = quotes.get(instrument_key, {})
+        greeks = q.get("option_greeks") or q.get("greeks") or {}
+        return {
+            "delta": float(greeks.get("delta") or 0.0),
+            "theta": float(greeks.get("theta") or 0.0),
+            "gamma": float(greeks.get("gamma") or 0.0),
+            "vega": float(greeks.get("vega") or 0.0),
+            "iv": float(greeks.get("iv") or 0.0),
+        }
+    except Exception as exc:
+        logger.error(f"Error fetching greeks for {instrument_key}: {exc}")
+        return {}

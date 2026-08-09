@@ -1,7 +1,3 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
-
 """Verify the Breakout-only finding through real TP/SL trade simulation.
 
 Stratification showed the pooled signal has no tradeable edge, but the
@@ -13,7 +9,12 @@ Compares, net of costs:
     ALL signals   vs   BREAKOUT only   vs   BREAKOUT + filters
 across several target/stop geometries.
 """
+
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
 
 import sys
 from pathlib import Path
@@ -23,7 +24,9 @@ import pandas as pd
 
 from apex_python_scanner import ApexConfig, ApexScanner
 
-CACHE = Path(__file__).resolve().parent / "angel_cache"
+CACHE = Path(__file__).resolve().parent.parent / "python_scanner" / "angel_cache"
+if not CACHE.exists():
+    raise SystemExit(f"cache directory not found: {CACHE}")
 COST = 0.182  # charges + slippage, round trip %
 
 

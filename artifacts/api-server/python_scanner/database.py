@@ -1,7 +1,10 @@
+import logging
 import os
 from datetime import datetime
 from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, DateTime, text
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+logger = logging.getLogger(__name__)
 
 Base = declarative_base()
 
@@ -103,6 +106,29 @@ def _migrate_sqlite_schema() -> None:
                 for name, definition in additions.items():
                     if name not in existing:
                         conn.execute(text(f"ALTER TABLE trades ADD COLUMN {name} {definition}"))
+                # A trade is identified by (symbol, timeframe, entry_time,
+                # direction). Without a unique index the scan loop persisted the
+                # same closure repeatedly — 256 duplicate identity groups
+                # accumulated, 33 of them with contradictory win/loss signs, and
+                # every SQL statistic counted them all.
+                #
+                # Created only when the existing data permits it; a partially
+                # de-duplicated database keeps running rather than failing to
+                # start, and logs what is blocking the constraint.
+                dupes = conn.execute(text(
+                    "SELECT COUNT(*) FROM (SELECT symbol, timeframe, entry_time, direction "
+                    "FROM trades GROUP BY symbol, timeframe, entry_time, direction HAVING COUNT(*) > 1)"
+                )).scalar() or 0
+                if dupes:
+                    logger.warning(
+                        "trades has %d duplicate identity groups; unique index not created. "
+                        "De-duplicate to enable it.", dupes,
+                    )
+                else:
+                    conn.execute(text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_trade_identity "
+                        "ON trades (symbol, timeframe, entry_time, direction)"
+                    ))
             break
         except Exception as exc:
             if attempt == 4:

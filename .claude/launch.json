@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "apex-dashboard",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "artifacts/trading-dashboard", "run", "dev"],
+      "port": 5173
+    }
+  ]
+}

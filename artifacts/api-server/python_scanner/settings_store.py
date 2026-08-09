@@ -19,6 +19,14 @@ SETTINGS_PATH = Path(__file__).resolve().parent / "apex_settings.json"
 DEFAULTS: dict[str, Any] = {
     # Which timeframes the background scanner runs.
     "enabled_timeframes": ["15m", "1h", "4h", "1d"],
+    # Which NSE index tiers to scan. All four = the full 236-symbol universe.
+    # Untick a tier to drop its constituents from the scan entirely.
+    "enabled_indices": ["NIFTY50", "NEXT50", "MIDCAP150", "SMALLCAP250"],
+    # Signal stabilisation buffer, in MINUTES, per timeframe. After the scanner
+    # raises a signal it must still be present after this delay before an order
+    # is placed. Filters signals that appear on one scan and vanish on the next.
+    # Scaled to the bar: ~1/15th of a bar's duration.
+    "signal_buffer_minutes": {"15m": 1, "1h": 5, "4h": 15, "1d": 30},
     # APEX signal gates. These mirror the manual APEX Hybrid Pro panel rather
     # than silently keeping a different set of per-timeframe values in the API.
     "min_score": 60.0,
@@ -117,7 +125,36 @@ def validate(partial: dict[str, Any]) -> dict[str, Any]:
     for key, value in partial.items():
         if key not in DEFAULTS:
             continue  # ignore unknown keys silently (forward compat)
-        if key == "enabled_timeframes":
+        if key == "signal_buffer_minutes":
+            if not isinstance(value, dict):
+                raise ValueError("signal_buffer_minutes must be an object keyed by timeframe")
+            limits = {"15m": (0, 15), "1h": (0, 60), "4h": (0, 120), "1d": (0, 240)}
+            cleaned: dict[str, int] = {}
+            for tf, (lo, hi) in limits.items():
+                if tf not in value:
+                    continue
+                try:
+                    mins = int(value[tf])
+                except (TypeError, ValueError):
+                    raise ValueError(f"signal_buffer_minutes[{tf}] must be a whole number of minutes")
+                if not lo <= mins <= hi:
+                    raise ValueError(f"signal_buffer_minutes[{tf}] must be between {lo} and {hi}")
+                cleaned[tf] = mins
+            if not cleaned:
+                raise ValueError("signal_buffer_minutes must set at least one timeframe")
+            clean[key] = {**DEFAULTS["signal_buffer_minutes"], **cleaned}
+        elif key == "enabled_indices":
+            from index_classification import ALL_INDICES
+            picked = (
+                [i for i in ALL_INDICES if i in {str(x).upper().strip() for x in value}]
+                if isinstance(value, list) else []
+            )
+            if not picked:
+                raise ValueError(
+                    "enabled_indices must contain at least one of " + "/".join(ALL_INDICES)
+                )
+            clean[key] = picked
+        elif key == "enabled_timeframes":
             tfs = [tf for tf in value if tf in ("15m", "1h", "4h", "1d")] if isinstance(value, list) else []
             if not tfs:
                 raise ValueError("enabled_timeframes must contain at least one of 15m/1h/4h/1d")

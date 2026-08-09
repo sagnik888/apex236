@@ -174,6 +174,70 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ScanTriggerResponse"
+  /options/chain:
+    get:
+      operationId: getOptionsChain
+      tags: [scanner]
+      summary: Get full options chain
+      parameters:
+        - name: symbol
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: expiry
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Full options chain
+  /options/greeks:
+    get:
+      operationId: getOptionsGreeks
+      tags: [scanner]
+      summary: Get real-time Greeks
+      parameters:
+        - name: instrument_key
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Real-time Greeks
+  /daybook:
+    get:
+      operationId: getDaybook
+      tags: [trades]
+      summary: Get intraday daybook P&L and positions
+      responses:
+        "200":
+          description: Daybook summary
+  /orders/book:
+    get:
+      operationId: getOrdersBook
+      tags: [trades]
+      summary: Get recent order intents and fill events
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 100
+      responses:
+        "200":
+          description: Orders book
+  /options/expiry:
+    get:
+      operationId: getOptionsExpiry
+      tags: [scanner]
+      summary: Get upcoming expiry dates
+      responses:
+        "200":
+          description: List of expiry dates
 components:
   schemas:
     HealthStatus:

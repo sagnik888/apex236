@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
@@ -24,6 +25,11 @@ from nifty50 import TIMEFRAMES
 from concurrent.futures import ThreadPoolExecutor
 
 scanner_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bg-scanner")
+# OCO reconciliation must NOT share the scan pool. That pool has exactly one
+# worker and a scan cycle takes seconds to tens of seconds, so reconciliation
+# queued behind it — meaning a filled stop's sibling target could stay live for
+# the length of a full scan. Order safety gets its own thread.
+oms_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="oms")
 
 # Configure logging
 log_level_str = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -45,16 +51,43 @@ engine = ScannerEngine()
 _ws_clients: set[WebSocket] = set()
 
 
+# A slow or half-open websocket client must never hold up the scan loop.
+_WS_SEND_TIMEOUT = 5.0
+_WS_MAX_CLIENTS = 64
+
+
 async def _push_to_all_clients(payload: dict) -> None:
-    """Broadcast a JSON payload to all connected WS clients, pruning dead ones."""
-    dead: list[WebSocket] = []
-    for ws in list(_ws_clients):
+    """Broadcast to all connected WS clients concurrently, pruning dead ones.
+
+    This used to `await ws.send_json(...)` sequentially with no timeout, from
+    inside _bg_scan_loop. One client on a stalled TCP connection blocked the
+    broadcast, and therefore the whole scan cycle, indefinitely. Sending
+    concurrently with a per-client timeout bounds the cost at _WS_SEND_TIMEOUT
+    no matter how many clients are wedged.
+    """
+    clients = list(_ws_clients)
+    if not clients:
+        return
+
+    async def send(ws) -> bool:
+        """True if delivered; False if the client timed out or errored."""
         try:
-            await ws.send_json(payload)
-        except Exception:
-            dead.append(ws)
-    for ws in dead:
-        _ws_clients.discard(ws)
+            await asyncio.wait_for(ws.send_json(payload), timeout=_WS_SEND_TIMEOUT)
+            return True
+        except asyncio.TimeoutError:
+            logger.warning("WS client exceeded %.0fs send timeout; dropping it.", _WS_SEND_TIMEOUT)
+            return False
+        except Exception as exc:
+            logger.debug("WS send failed: %s", exc)
+            return False
+
+    # Results are positional, so failures map back by INDEX. Identifying them by
+    # isinstance() is fragile — it silently stops pruning anything the type check
+    # does not recognise, which is exactly the wedged-client case that matters.
+    results = await asyncio.gather(*(send(ws) for ws in clients), return_exceptions=True)
+    for ws, ok in zip(clients, results):
+        if ok is not True:
+            _ws_clients.discard(ws)
 
 
 async def _bg_scan_loop() -> None:
@@ -99,20 +132,36 @@ async def _bg_scan_loop() -> None:
             # leg) before the next scan so no stale protective/target order lingers.
             try:
                 from options_engine import reconcile_open_ocos
-                oco_actions = await loop.run_in_executor(scanner_pool, reconcile_open_ocos)
+                # Own pool + hard timeout: a hung broker call must not stall
+                # the scan loop, and reconciliation must not queue behind a scan.
+                oco_actions = await asyncio.wait_for(
+                    loop.run_in_executor(oms_pool, reconcile_open_ocos), timeout=30.0
+                )
                 if oco_actions:
                     logger.info(f"OCO reconcile: {oco_actions}")
             except Exception as exc:
                 logger.debug(f"OCO reconcile skipped: {exc}")
 
+            # Auto square-off on expiry day at 15:20 IST
+            try:
+                from options_engine import should_auto_squareoff, auto_squareoff_positions
+                if should_auto_squareoff():
+                    squareoff_result = await asyncio.wait_for(
+                        loop.run_in_executor(oms_pool, auto_squareoff_positions), timeout=30.0
+                    )
+                    if squareoff_result:
+                        logger.info(f"Expiry squareoff: {squareoff_result}")
+            except Exception as exc:
+                logger.debug(f"Expiry squareoff check skipped: {exc}")
+
             if ms["market_open"]:
                 live_scan_counter += 1
-                # Do not expand each one-minute scan with active higher timeframes:
-                # that made every cycle take several minutes and delayed the next
-                # live 15m refresh. Higher-timeframe trailing is handled below.
-                timeframes = {"15m"}
-                if live_scan_counter % 5 == 0:
-                    timeframes.update(["1h", "4h", "1d"])
+                # Staggered cadence: 15m every cycle, 1h every 5, 4h every 10,
+                # 1d every 15. Previously all three higher timeframes landed on
+                # the same 5th cycle, so one cycle in five carried 4x the work
+                # and delayed the next live 15m refresh.
+                from scanner_engine import timeframes_due
+                timeframes = set(timeframes_due(live_scan_counter))
             else:
                 live_scan_counter = 0
                 timeframes = {"15m", "1h", "4h", "1d"}
@@ -128,6 +177,23 @@ async def _bg_scan_loop() -> None:
                     await _push_to_all_clients({"type": "scan_complete", "stats": stats})
                     # Push individual notification events (new signals, TP/SL hits)
                     events = engine.pop_pending_events()
+
+                    # Route state transitions to the broker BEFORE notifying the
+                    # UI: order placement is the time-critical half. Runs on the
+                    # OMS pool so a slow broker call cannot stall the scan loop,
+                    # and is fully gated by is_live_execution().
+                    if events:
+                        try:
+                            from oms import get_oms
+                            summary = await asyncio.wait_for(
+                                loop.run_in_executor(oms_pool, get_oms().handle_events, events),
+                                timeout=60.0,
+                            )
+                            if summary.get("opened") or summary.get("closed"):
+                                logger.info("OMS: %s", summary)
+                        except Exception as exc:
+                            logger.error("OMS dispatch failed: %s", exc)
+
                     for evt in events:
                         await _push_to_all_clients(evt)
                     if events:
@@ -154,6 +220,7 @@ async def lifespan(app: FastAPI):
         pass
     finally:
         scanner_pool.shutdown(wait=False, cancel_futures=True)
+        oms_pool.shutdown(wait=False, cancel_futures=True)
         engine.shutdown()
 
 
@@ -198,6 +265,38 @@ def _check_auth(request: Request) -> None:
     if api_key_header.strip() == required_key:
         return
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
+
+
+def _check_csrf(request: Request) -> None:
+    """Block cross-site writes that never trigger a CORS preflight.
+
+    CORSMiddleware only protects a route when the browser sends a preflight, and
+    a preflight is only sent for "non-simple" requests. Starlette's
+    `Request.json()` never inspects Content-Type, so a cross-origin
+    `fetch(..., {mode:'no-cors', headers:{'Content-Type':'text/plain'}, body:'{...}'})`
+    is a CORS *simple request*: no preflight, the handler runs, the write lands.
+    Only the response is hidden from the attacking page — which is irrelevant
+    when the goal is to mutate risk settings.
+
+    Two independent gates, both cheap:
+      1. Require a real JSON Content-Type, which forces a preflight.
+      2. Require any Origin header present to be on the allowlist. CORSMiddleware
+         does not enforce this itself for simple requests.
+    Non-browser clients (curl, python) send no Origin and are unaffected here —
+    they are what APEX_API_KEY is for.
+    """
+    ctype = (request.headers.get("content-type") or "").split(";")[0].strip().lower()
+    if ctype != "application/json":
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail="Content-Type must be application/json",
+        )
+    origin = request.headers.get("origin")
+    if origin and origin not in allowed_origins:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cross-origin write rejected",
+        )
 
 
 def _validate_timeframe(timeframe: Optional[str]) -> Optional[JSONResponse]:
@@ -345,7 +444,7 @@ def get_settings_endpoint(request: Request):
     return get_settings()
 
 
-@app.post("/api/settings", dependencies=[Depends(_check_auth)])
+@app.post("/api/settings", dependencies=[Depends(_check_auth), Depends(_check_csrf)])
 @limiter.limit("10/minute")
 async def update_settings_endpoint(request: Request):
     """Save user scanner settings; applied from the next scan onward."""
@@ -372,7 +471,7 @@ def get_history(request: Request, limit: int = Query(300, ge=1, le=1000), symbol
     return engine.get_history(limit=limit, symbol=symbol, timeframe=timeframe)
 
 
-@app.post("/api/scan", dependencies=[Depends(_check_auth)])
+@app.post("/api/scan", dependencies=[Depends(_check_auth), Depends(_check_csrf)])
 @limiter.limit("5/minute")
 async def trigger_scan(request: Request):
     """Trigger a fresh scan asynchronously (honest about overlap skips)."""
@@ -400,7 +499,11 @@ async def trigger_scan(request: Request):
 
 
 @app.get("/api/brokers/status")
-@limiter.limit("30/minute")
+# Polled by SystemHealthPanel (10s) AND Dashboard (10s) = 12 req/min per
+# browser tab, and slowapi keys on remote address, so tabs share the
+# budget: three open tabs would 429 against a 30/min limit. The handler
+# is ~1ms (no network I/O), so the cost of a higher ceiling is nil.
+@limiter.limit("120/minute")
 def get_brokers_status(request: Request):
     """Multi-broker load balancer status, rate limits, and Upstox/Angel health."""
     from broker_dispatcher import get_dispatcher
@@ -408,6 +511,167 @@ def get_brokers_status(request: Request):
     return {
         "dispatcher": get_dispatcher().status(),
         "data_health": get_data_health(),
+    }
+
+
+@app.get("/api/auth/upstox", dependencies=[Depends(_check_auth)])
+@limiter.limit("60/minute")
+def get_upstox_auth_status(request: Request):
+    """Upstox session state + the browser URL to start a new one.
+
+    Upstox tokens die at 03:30 IST every day and cannot be renewed
+    programmatically — the exchange step needs a human browser login. Surfacing
+    the countdown lets the operator re-auth BEFORE the session lapses instead of
+    discovering it when an order fails.
+    """
+    from upstox_auth import get_upstox_auth
+
+    auth = get_upstox_auth()
+    payload = auth.status()
+    try:
+        payload["login_url"] = auth.login_url()
+    except ValueError as exc:
+        payload["login_url"] = None
+        payload["reason"] = payload.get("reason") or str(exc)
+    return payload
+
+
+@app.post("/api/auth/upstox", dependencies=[Depends(_check_auth), Depends(_check_csrf)])
+@limiter.limit("10/minute")
+async def complete_upstox_login(request: Request):
+    """Finish the OAuth flow. Accepts the bare code or the whole redirect URL."""
+    from upstox_auth import get_upstox_auth
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be JSON")
+    code = str((body or {}).get("code") or (body or {}).get("url") or "").strip()
+    if not code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Supply the authorization code or the redirect URL as 'code'")
+    try:
+        result = get_upstox_auth().complete_login(code)
+    except Exception as exc:
+        # The operator needs Upstox's actual complaint, not a generic 500.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return {"status": "ok", **result}
+
+
+@app.post("/api/auth/upstox/recheck", dependencies=[Depends(_check_auth), Depends(_check_csrf)])
+@limiter.limit("30/minute")
+def recheck_upstox_session(request: Request):
+    """Re-probe the cached token (after a manual edit of upstox_secrets.env)."""
+    from upstox_auth import get_upstox_auth
+
+    auth = get_upstox_auth()
+    auth.load_cached_session()
+    return auth.status()
+
+
+@app.get("/api/indices")
+@limiter.limit("60/minute")
+def get_indices(request: Request):
+    """NSE index tiers available for the scan-universe toggle.
+
+    `scannable` is what the tier contributes to the live scan; it can be lower
+    than `total` when a constituent is not in the configured universe (e.g.
+    TMCV after the Tata Motors split). Reported rather than hidden so index
+    drift after an NSE rebalance is visible.
+    """
+    from index_classification import coverage_report, describe
+    from scanner_engine import SCAN_SYMBOLS, active_scan_symbols
+    from settings_store import get_settings
+
+    report = coverage_report()
+    return {
+        "indices": describe(),
+        "selected": get_settings().get("enabled_indices"),
+        "active_symbols": len(active_scan_symbols()),
+        "universe_symbols": len(SCAN_SYMBOLS),
+        "unclassified_in_universe": report["unclassified_in_universe"],
+        "classified_not_in_universe": report["classified_not_in_universe"],
+    }
+
+
+@app.post("/api/webhooks/{broker}")
+@limiter.limit("600/minute")
+async def broker_order_webhook(request: Request, broker: str):
+    """Broker order-update intake (Upstox postback / Angel order push).
+
+    The system had no webhook integration at all: order state was polled at most
+    once per 60-second scan and lost on restart, leaving a multi-minute window
+    between a stop filling and its sibling target being cancelled.
+
+    Authenticated with APEX_WEBHOOK_SECRET (query param `secret` or the
+    X-Apex-Signature header) and FAILS CLOSED when that is unset — a forged fill
+    can drive the OMS into cancelling or reversing a real position.
+    """
+    from order_events import ingest, verify_webhook_secret, webhook_secret_configured
+
+    if not webhook_secret_configured():
+        logger.error("Rejected %s webhook: APEX_WEBHOOK_SECRET is not configured", broker)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Webhook intake disabled: APEX_WEBHOOK_SECRET is not configured",
+        )
+    supplied = request.headers.get("X-Apex-Signature") or request.query_params.get("secret")
+    if not verify_webhook_secret(supplied):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook secret")
+
+    if broker.lower() not in ("upstox", "angel"):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown broker {broker!r}")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Body must be JSON")
+
+    event = ingest(broker, payload if isinstance(payload, dict) else {})
+    if event is None:
+        return JSONResponse(status_code=status.HTTP_202_ACCEPTED,
+                            content={"accepted": False, "reason": "unparseable payload"})
+
+    # A terminal leg must cancel its sibling immediately, not at the next poll.
+    try:
+        from options_engine import on_order_event
+        actions = on_order_event(event)
+    except Exception as exc:
+        logger.error("OCO reaction to %s failed: %s", event.order_id, exc)
+        actions = []
+    return {"accepted": True, "order_id": event.order_id, "status": event.status, "actions": actions}
+
+
+@app.get("/api/oms/positions", dependencies=[Depends(_check_auth)])
+@limiter.limit("60/minute")
+def get_oms_positions(request: Request):
+    """Positions the OMS believes the broker holds, plus recent order intents.
+
+    Distinct from /api/trades, which is the scanner's simulated book. A gap
+    between the two is exactly the live-vs-simulated divergence the audit found
+    nobody could see.
+    """
+    from oms import get_oms
+    from simulation_engine import get_execution_mode, is_live_execution
+
+    oms = get_oms()
+    return {
+        "execution_mode": get_execution_mode(),
+        "live": is_live_execution(),
+        "positions": oms.positions(),
+        "pending_stabilisation": oms.pending(),
+        "recent_intents": oms.intents(50),
+    }
+
+
+@app.get("/api/orders/events", dependencies=[Depends(_check_auth)])
+@limiter.limit("60/minute")
+def get_order_events(request: Request, limit: int = Query(100, ge=1, le=500)):
+    """Recent broker order updates, newest first."""
+    from order_events import get_store, webhook_secret_configured
+    return {
+        "webhook_enabled": webhook_secret_configured(),
+        "events": get_store().recent(limit),
     }
 
 
@@ -431,7 +695,7 @@ def get_resolved_option(
     return contract
 
 
-@app.post("/api/options/trade", dependencies=[Depends(_check_auth)])
+@app.post("/api/options/trade", dependencies=[Depends(_check_auth), Depends(_check_csrf)])
 @limiter.limit("10/minute")
 async def post_option_trade(request: Request):
     """Execute live option entry (CE/PE) directly via Upstox MultiBrokerDispatcher."""
@@ -461,6 +725,129 @@ async def post_option_trade(request: Request):
     except ValueError as exc:
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
 
+@app.get("/api/options/chain")
+@limiter.limit("30/minute")
+def get_options_chain_endpoint(
+    request: Request,
+    symbol: str = Query(..., description="Underlying symbol"),
+    expiry: Optional[str] = Query(None, description="Expiry date YYYY-MM-DD")
+):
+    from data_provider import fetch_options_chain
+    chain = fetch_options_chain(symbol, expiry)
+    return {"symbol": symbol, "chain": chain}
+
+@app.get("/api/options/greeks")
+@limiter.limit("60/minute")
+def get_options_greeks_endpoint(
+    request: Request,
+    instrument_key: str = Query(...)
+):
+    from data_provider import fetch_option_greeks
+    return fetch_option_greeks(instrument_key)
+
+@app.get("/api/daybook", dependencies=[Depends(_check_auth)])
+@limiter.limit("30/minute")
+def get_daybook(request: Request):
+    try:
+        from broker_upstox import get_upstox_client
+        client = get_upstox_client()
+        client.ensure_session()
+        
+        url = "https://api.upstox.com/v2/portfolio/short-term-positions"
+        r = client._http.get(url, headers=client._headers(), timeout=10)
+        
+        realized = 0.0
+        unrealized = 0.0
+        positions = []
+        trades = 0
+        wins = 0
+        losses = 0
+        
+        if r.ok:
+            data = r.json()
+            if data.get("status") == "success" and data.get("data"):
+                for pos in data["data"]:
+                    rpnl = float(pos.get("realised", 0) or pos.get("realised_profit", 0) or 0)
+                    upnl = float(pos.get("unrealised", 0) or pos.get("unrealised_profit", 0) or 0)
+                    realized += rpnl
+                    unrealized += upnl
+                    
+                    qty = int(pos.get("quantity", 0) or 0)
+                    if qty != 0:
+                        positions.append({
+                            "symbol": pos.get("tradingsymbol", ""),
+                            "direction": "LONG" if qty > 0 else "SHORT",
+                            "entry_price": float(pos.get("average_price", 0) or 0),
+                            "current_price": float(pos.get("last_price", 0) or 0),
+                            "pnl_inr": upnl,
+                            "quantity": abs(qty)
+                        })
+                    
+                    if rpnl != 0:
+                        trades += 1
+                        if rpnl > 0:
+                            wins += 1
+                        else:
+                            losses += 1
+                            
+        return {
+            "total_realized_pnl": realized,
+            "total_unrealized_pnl": unrealized,
+            "net_pnl": realized + unrealized,
+            "positions": positions,
+            "trade_count": trades,
+            "win_count": wins,
+            "loss_count": losses
+        }
+    except Exception as exc:
+        logger.error(f"Daybook error: {exc}")
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+@app.get("/api/orders/book", dependencies=[Depends(_check_auth)])
+@limiter.limit("30/minute")
+def get_orders_book(request: Request, limit: int = Query(100)):
+    try:
+        from oms import get_oms
+        oms = get_oms()
+        intents = oms.intents(limit)
+    except:
+        intents = []
+        
+    try:
+        from order_events import get_store
+        fills = get_store().recent(limit)
+    except:
+        fills = []
+        
+    return {
+        "intents": intents,
+        "fills": fills
+    }
+
+@app.get("/api/options/expiry")
+@limiter.limit("30/minute")
+def get_options_expiry(request: Request):
+    try:
+        from broker_upstox import get_upstox_client, _parse_expiry
+        from datetime import datetime
+        client = get_upstox_client()
+        _, fo_index = client.instrument_map()
+        
+        now_date = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        expiries = set()
+        
+        for underlying, contracts in fo_index.items():
+            for c in contracts:
+                exp = _parse_expiry(c.get("expiry"))
+                if exp and exp >= now_date:
+                    expiries.add(exp.strftime("%Y-%m-%d"))
+                    
+        sorted_expiries = sorted(list(expiries))
+        return {"expiries": sorted_expiries[:30]}
+    except Exception as exc:
+        logger.error(f"Expiry fetch error: {exc}")
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+
 
 @app.websocket("/api/ws")
 async def ws_endpoint(websocket: WebSocket):
@@ -475,10 +862,19 @@ async def ws_endpoint(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_text()
-            # Echo pings / handle client commands
-            if data == "ping":
-                await websocket.send_text("pong")
-            elif data == "stats":
+            # The client sends JSON.stringify({type:"ping"}), so the bare
+            # string comparison never matched and no pong was ever returned —
+            # the heartbeat was dead in both directions and neither side could
+            # detect a half-open connection. Accept both shapes.
+            command = data.strip()
+            if command.startswith("{"):
+                try:
+                    command = str((json.loads(data) or {}).get("type", ""))
+                except (ValueError, TypeError):
+                    command = ""
+            if command == "ping":
+                await websocket.send_json({"type": "pong"})
+            elif command == "stats":
                 await websocket.send_json({"type": "stats", "stats": engine.get_stats()})
     except WebSocketDisconnect:
         _ws_clients.discard(websocket)
@@ -488,8 +884,19 @@ async def ws_endpoint(websocket: WebSocket):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "8080"))
+    # Loopback by default. This server exposes settings writes and an order
+    # endpoint, and APEX_API_KEY is unset in every checked-in configuration, so
+    # _check_auth returns immediately — binding 0.0.0.0 published an
+    # unauthenticated control plane to the whole LAN. Set APEX_BIND explicitly
+    # to widen it, and set APEX_API_KEY when you do.
+    host = os.environ.get("APEX_BIND", "127.0.0.1").strip() or "127.0.0.1"
+    if host != "127.0.0.1" and not os.getenv("APEX_API_KEY", "").strip():
+        logger.warning(
+            "APEX_BIND=%s exposes this server beyond loopback while APEX_API_KEY is unset; "
+            "settings and order endpoints will be unauthenticated.", host,
+        )
     # The desktop launcher owns process restarts.  Uvicorn's reload supervisor
     # creates a parent/child pair on Windows, which left a supervisor alive after
     # the launcher killed the port-owning child.  The supervisor then respawned
     # the child and caused the next launch to fail with WinError 10013.
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    uvicorn.run(app, host=host, port=port, log_level="info")

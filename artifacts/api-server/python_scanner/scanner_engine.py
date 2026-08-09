@@ -31,6 +31,94 @@ IST_TZ = ZoneInfo("Asia/Kolkata")
 _symbol_limit = int(os.getenv("APEX_SYMBOL_LIMIT", "0") or "0")
 SCAN_SYMBOLS: list[str] = NIFTY236_SYMBOLS[:_symbol_limit] if _symbol_limit > 0 else NIFTY236_SYMBOLS
 
+
+def scan_worker_count() -> int:
+    """Scan-pool size, sized to the machine.
+
+    The scan pool is a ProcessPoolExecutor, so this is genuinely parallel CPU
+    work with no GIL contention — but it is CPU-bound pandas, so the target is
+    PHYSICAL cores, not SMT threads. The old default capped at 4 regardless of
+    the host, which left most of a 10-core machine idle while a full
+    four-timeframe cycle took four times longer than it needed to.
+
+    Policy: ~75% of logical CPUs, always leaving at least 4 free for the
+    FastAPI event loop, the two broker tick feeds, the OMS pool, the healer
+    thread and the OS. Capped at 16 so a very large host does not spawn more
+    processes than the memory budget allows — each worker is a separate Python
+    process carrying its own pandas/numpy (~200-300 MB resident).
+
+    On the deployment target (i7-13th gen, 10 physical cores / 16 threads,
+    16 GB) this yields 12 workers: 75% of threads, ~3.5 GB of worker memory.
+
+    Override with APEX_SCAN_WORKERS.
+    """
+    override = os.getenv("APEX_SCAN_WORKERS", "").strip()
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            logger.warning("Ignoring non-numeric APEX_SCAN_WORKERS=%r", override)
+    cpus = os.cpu_count() or 2
+    # Latency optimization: target ~65% of logical CPUs based on user constraints (10-11 workers on a 16-thread CPU)
+    # This leaves plenty of headroom for the OS, event loops, and UI.
+    target = int(cpus * 0.65)
+    return max(1, min(16, target))
+
+
+# How often each timeframe is rescanned, in 60-second scan cycles. Smaller
+# timeframes refresh every cycle because their bars close fastest; larger ones
+# are staggered so they never all land on the same cycle, which spreads the load
+# instead of spiking it. Every timeframe is still refreshed well inside the
+# 10-15 minute freshness requirement.
+# (period, offset) in cycles. The offsets are chosen so the higher timeframes
+# never land on the same cycle: without them cycle 30 is divisible by 5, 10 AND
+# 15, so one cycle a half-hour carried every timeframe at once.
+_TF_SCAN_SCHEDULE: dict[str, tuple[int, int]] = {
+    "15m": (1, 0),    # every minute
+    "1h": (5, 0),     # minutes 5, 10, 15 ...
+    "4h": (10, 3),    # minutes 3, 13, 23 ...
+    "1d": (15, 7),    # minutes 7, 22, 37 ...
+}
+
+
+def timeframes_due(cycle: int, enabled: Optional[list[str]] = None) -> list[str]:
+    """Which timeframes to scan on this cycle.
+
+    Staggered rather than "all higher timeframes together every 5th cycle", so
+    a single cycle never has to carry 4x the work.
+    """
+    allowed = set(enabled or TIMEFRAMES)
+    due = []
+    for tf in TIMEFRAMES:
+        if tf not in allowed:
+            continue
+        period, offset = _TF_SCAN_SCHEDULE.get(tf, (1, 0))
+        if cycle % period == offset % period:
+            due.append(tf)
+    # The fastest enabled timeframe must never be skipped.
+    if not due:
+        fastest = next((tf for tf in TIMEFRAMES if tf in allowed), None)
+        due = [fastest] if fastest else []
+    return due
+
+
+def active_scan_symbols() -> list[str]:
+    """Symbols to scan right now, honouring the operator's index-tier selection.
+
+    SCAN_SYMBOLS is fixed at import; this is evaluated per call so unticking a
+    tier in Settings takes effect on the next cycle without a restart.
+    Fails open to the full universe — a bad selection must never silently
+    shrink the scan to nothing.
+    """
+    try:
+        from index_classification import symbols_for
+        from settings_store import get_settings
+        picked = symbols_for(get_settings().get("enabled_indices"), universe=SCAN_SYMBOLS)
+        return picked or list(SCAN_SYMBOLS)
+    except Exception as exc:
+        logger.warning("Index selection unavailable (%s); scanning the full universe.", exc)
+        return list(SCAN_SYMBOLS)
+
 # ─── NSE Session Helpers ──────────────────────────────────────────────────────
 
 NSE_OPEN  = dt_time(9, 15)
@@ -512,6 +600,7 @@ def _scan_preloaded(
     tf: str,
     df: pd.DataFrame,
     settings_rev: int = 0,
+    live_option_ltp: float = math.nan,
 ) -> Optional[SymbolResult]:
     """Top-level worker function executed inside ProcessPoolExecutor."""
     global _WORKER_CONFIGS_CACHE, _WORKER_SETTINGS_REV
@@ -529,7 +618,7 @@ def _scan_preloaded(
         if cfg is None:
             return None
         scanner = ApexScanner(cfg)
-        return scanner.run_symbol(symbol, df, last_bar_is_forming=_last_bar_is_forming(df, tf))
+        return scanner.run_symbol(symbol, df, last_bar_is_forming=_last_bar_is_forming(df, tf), live_option_ltp=live_option_ltp)
     except Exception as exc:
         logger.warning(f"Worker scan error for {symbol}/{tf}: {exc}")
         return None
@@ -570,9 +659,7 @@ class ScannerEngine:
 
     def _get_scan_executor(self) -> ProcessPoolExecutor:
         if self._scan_executor is None:
-            default_workers = max(1, min(4, (os.cpu_count() or 2) - 1))
-            worker_count = max(1, int(os.getenv("APEX_SCAN_WORKERS", str(default_workers))))
-            self._scan_executor = ProcessPoolExecutor(max_workers=worker_count)
+            self._scan_executor = ProcessPoolExecutor(max_workers=scan_worker_count())
         return self._scan_executor
 
     def shutdown(self) -> None:
@@ -790,23 +877,46 @@ class ScannerEngine:
             # timeframes continue to be monitored and managed by the scanner.
             settings_rev = settings_revision()
             ms = get_market_status()
+            # Resolved once per cycle so an index-tier toggle takes effect on the
+            # next scan, and every stage of this cycle sees the same set.
+            scan_symbols = active_scan_symbols()
             logger.info(
-                f"Starting scan: {len(SCAN_SYMBOLS)} symbols × {len(tfs_to_scan)} timeframes "
-                f"[session={ms['session_status']}]"
+                f"Starting scan: {len(scan_symbols)}/{len(SCAN_SYMBOLS)} symbols "
+                f"× {len(tfs_to_scan)} timeframes [session={ms['session_status']}]"
             )
             prev_states = self._snapshot_states()
             new_results: dict[str, dict[str, SymbolResult]] = {tf: {} for tf in tfs_to_scan}
             from data_provider import prefetch_all_ohlcv
+            
+            # DUAL TRACKING: Fetch live option premiums for all active trades
+            live_option_ltps: dict[str, float] = {}
+            active_opt_keys = set()
+            with self._results_lock:
+                for tf_res in self._results.values():
+                    for res in tf_res.values():
+                        if res.latest.get("state") in ("ACTIVE", "PENDING"):
+                            opt_sym = res.latest.get("option_symbol")
+                            if opt_sym:
+                                active_opt_keys.add(opt_sym)
+            if active_opt_keys:
+                try:
+                    from broker_upstox import get_upstox_client
+                    upstox = get_upstox_client()
+                    quotes = upstox.get_quote(list(active_opt_keys))
+                    for key, q in quotes.items():
+                        live_option_ltps[key] = float(q.get("last_price", math.nan))
+                except Exception as e:
+                    logger.warning(f"Failed to fetch live option premiums: {e}")
 
             # Warm and publish one timeframe at a time. Copy-on-write result
             # dictionaries let API readers see completed symbols immediately
             # without ever iterating a dictionary that is being mutated.
             for tf in tfs_to_scan:
-                prefetch_all_ohlcv(SCAN_SYMBOLS, [tf])
+                prefetch_all_ohlcv(scan_symbols, [tf])
                 executor = self._get_scan_executor()
-                symbol_iterator = iter(SCAN_SYMBOLS)
+                symbol_iterator = iter(scan_symbols)
                 pending: dict[Any, str] = {}
-                max_pending = max(2, int(os.getenv("APEX_SCAN_WORKERS", "4")) * 2)
+                max_pending = max(2, scan_worker_count() * 2)
 
                 def submit_next() -> bool:
                     try:
@@ -814,7 +924,19 @@ class ScannerEngine:
                     except StopIteration:
                         return False
                     df = fetch_ohlcv(symbol, tf)
-                    pending[executor.submit(_scan_preloaded, symbol, tf, df, settings_rev)] = symbol
+                    if len(df) > 400:
+                        df = df.iloc[-400:].copy()
+                    
+                    # Find option_ltp for this symbol if active
+                    opt_ltp = math.nan
+                    with self._results_lock:
+                        res = self._results.get(tf, {}).get(symbol)
+                        if res and res.latest.get("state") in ("ACTIVE", "PENDING"):
+                            opt_sym = res.latest.get("option_symbol")
+                            if opt_sym:
+                                opt_ltp = live_option_ltps.get(opt_sym, math.nan)
+
+                    pending[executor.submit(_scan_preloaded, symbol, tf, df, settings_rev, opt_ltp)] = symbol
                     return True
 
                 while len(pending) < max_pending and submit_next():
@@ -877,10 +999,21 @@ class ScannerEngine:
                 # Legacy hygiene: rows written with ".NS" symbols can never be
                 # matched by the engine (it queries stripped names), so ACTIVE
                 # ones would stay open forever. Close them explicitly.
+                # This was the last remaining path that could write a CLOSED row
+                # with pnl NULL: it set status/exit_reason/exit_time and no
+                # exit_price or pnl, and it sits outside _process_db_state so it
+                # bypassed close_with_mark_to_market entirely. Any row it closes
+                # is now marked at its own entry (a true scratch, since these
+                # rows are unmatchable and carry no usable last price) so it
+                # still cannot produce a NULL.
                 for zombie in db.query(Trade).filter(Trade.status == "ACTIVE", Trade.symbol.like("%.NS")).all():
                     zombie.status = "CLOSED"
-                    zombie.exit_reason = "LEGACY_SYMBOL_CLEANUP"
+                    zombie.exit_reason = "LEGACY_SYMBOL_CLEANUP [NO MARK]"
                     zombie.exit_time = ist_now().replace(tzinfo=None)
+                    if zombie.exit_price is None:
+                        zombie.exit_price = zombie.entry_price
+                    if zombie.pnl is None:
+                        zombie.pnl = 0.0
                 db.commit()
             except Exception as e:
                 db.rollback()
@@ -916,6 +1049,74 @@ class ScannerEngine:
                 self._scan_count,
                 scan_latency_ms,
             )
+
+    def _portfolio_gate(self, db, sym: str, tf: str) -> tuple[bool, str]:
+        """Account-level entry gate, evaluated against the trades TABLE.
+
+        This is the enforcement point the system never had. `_apply_selection`
+        and `_portfolio_circuit_state` computed slots, sector caps and a daily
+        loss breaker and wrote them into a `selected` flag on the /api/signals
+        payload that nothing read — so `max_open_positions = 5` admitted a
+        measured peak of 443 concurrent positions, and `daily_max_loss_pct = 2.0`
+        required ONE symbol on ONE timeframe to lose 2% in a session because the
+        counters were `run_symbol` locals rebuilt every scan.
+
+        Counting from the DB rather than the in-memory replay makes both limits
+        global across all 236 symbols and all four timeframes, and makes them
+        survive a process restart for free.
+
+        Off-switches, so this is controllable without editing code:
+          max_open_positions = 0  -> unlimited positions
+          max_per_sector     = 0  -> no sector cap
+          daily_max_loss_pct = 0  -> no daily loss breaker
+
+        Returns (admitted, reason). Fails OPEN on error: a risk check that throws
+        must not silently halt all trading.
+        """
+        try:
+            from settings_store import get_settings
+            s = get_settings()
+            max_open = int(s.get("max_open_positions", 0) or 0)
+            max_sector = int(s.get("max_per_sector", 0) or 0)
+            daily_max = abs(float(s.get("daily_max_loss_pct", 0) or 0))
+            if max_open <= 0 and max_sector <= 0 and daily_max <= 0:
+                return True, ""
+
+            if daily_max > 0:
+                today = ist_now().date()
+                realized = 0.0
+                for (pnl,) in (
+                    db.query(Trade.pnl)
+                    .filter(Trade.status == "CLOSED", Trade.exit_time >= datetime.combine(today, dt_time(0, 0)))
+                    .all()
+                ):
+                    if pnl is not None:
+                        realized += float(pnl)
+                if realized <= -daily_max:
+                    return False, f"daily loss breaker: realized {realized:.2f}% <= -{daily_max:.2f}%"
+
+            if max_open <= 0 and max_sector <= 0:
+                return True, ""
+
+            open_rows = db.query(Trade).filter(Trade.status == "ACTIVE").all()
+            if max_open > 0 and len(open_rows) >= max_open:
+                return False, f"book full: {len(open_rows)}/{max_open} positions open"
+
+            if max_sector > 0:
+                from sectors import get_sector
+                sector = get_sector(sym)
+                # sectors.py maps 124 of 236 symbols to a catch-all "NSE" bucket.
+                # Applying a 2-per-sector cap to that bucket would throttle 52% of
+                # the universe against each other, so it is exempt until the map
+                # covers every name.
+                if sector and sector != "NSE":
+                    in_sector = sum(1 for r in open_rows if get_sector(r.symbol) == sector)
+                    if in_sector >= max_sector:
+                        return False, f"sector cap: {sector} has {in_sector}/{max_sector} open"
+            return True, ""
+        except Exception as exc:
+            logger.error("Portfolio gate failed for %s/%s (failing open): %s", sym, tf, exc)
+            return True, ""
 
     def _process_db_state(self, db, sym, tf, result: SymbolResult):
         from datetime import datetime
@@ -1060,8 +1261,17 @@ class ScannerEngine:
                     existing_closed = db.query(Trade).filter_by(
                         symbol=sym, timeframe=tf, entry_time=entry_dt, status="CLOSED"
                     ).first()
+                    admitted, gate_reason = self._portfolio_gate(db, sym, tf)
                     if existing_closed is not None:
-                        pass  # Skip creating a duplicate — this trade was already recorded
+                        # This exact trade is already recorded AND closed, so its
+                        # outcome is on the books; the replay is re-projecting it
+                        # (repaint). Leave active_db_trade None: creating a row
+                        # would duplicate it, and adopting the closed row would
+                        # let the update block below overwrite a finished trade's
+                        # entry price and levels.
+                        logger.debug("Skipping re-projected closed trade %s/%s @ %s", sym, tf, entry_dt)
+                    elif not admitted:
+                        logger.info("Entry rejected for %s/%s — %s", sym, tf, gate_reason)
                     else:
                         active_db_trade = Trade(
                             symbol=sym, timeframe=tf, direction=direction,
@@ -2332,12 +2542,22 @@ class ScannerEngine:
             active_timeframes = timeframes_for_style(trade_style, list(_s.get("enabled_timeframes", TIMEFRAMES)))
         except Exception:
             trade_style, active_timeframes = "all", list(TIMEFRAMES)
+        # The portfolio circuit state was computed and then reachable from no
+        # endpoint at all, so with 77 positions open against a cap of 5 nothing
+        # in the product said so. Surface it.
+        try:
+            portfolio = self._portfolio_circuit_state()
+        except Exception as exc:
+            logger.debug("portfolio circuit state unavailable: %s", exc)
+            portfolio = None
+
         return {
             "total_symbols":   len(SCAN_SYMBOLS),
             "active_trades":   active,
             "pending_signals": pending,
             "buy_signals":     buy_s,
             "sell_signals":    sell_s,
+            "portfolio":       portfolio,
             "last_scan":       _ts(self._last_scan),
             "scanning":        scanning,
             "scan_errors":     self._scan_errors,
@@ -2377,6 +2597,7 @@ class ScannerEngine:
         """Closed (exited / SL / target / repaint) trades from the DB log."""
         limit = max(1, min(int(limit), 1000))
         rows: list[dict] = []
+        summary: dict = {}
         db = SessionLocal()
         try:
             query = db.query(Trade).filter(Trade.status == "CLOSED")
@@ -2418,11 +2639,50 @@ class ScannerEngine:
                 })
                 if len(rows) >= limit:
                     break
+
+            # Headline statistics MUST be computed over the whole closed set,
+            # not over the page the UI happened to fetch. The dashboard was
+            # deriving them from the most recent `limit` rows with NULL-pnl
+            # rows folded in as zero, which reported avg -0.17%/trade against a
+            # true -0.54% and never surfaced the cumulative figure at all.
+            agg = db.query(Trade).filter(Trade.status == "CLOSED")
+            if symbol:
+                clean = symbol.replace(".NS", "").upper()
+                agg = agg.filter(Trade.symbol.in_([clean, clean + ".NS"]))
+            if timeframe:
+                agg = agg.filter(Trade.timeframe == timeframe)
+            pnls = [float(v) for (v,) in agg.with_entities(Trade.pnl).all() if v is not None]
+            unresolved = agg.filter(Trade.pnl.is_(None)).count()
+            closed_total = len(pnls) + unresolved
+            wins = [p for p in pnls if p > 0]
+            losses = [p for p in pnls if p < 0]
+            summary = {
+                "closed_total": closed_total,
+                # Trades with no recorded outcome. Counted, never averaged in.
+                "unresolved": unresolved,
+                "decided": len(pnls),
+                "win_rate_pct": round(100.0 * len(wins) / len(pnls), 2) if pnls else None,
+                "avg_pnl_pct": round(sum(pnls) / len(pnls), 4) if pnls else None,
+                "cumulative_pnl_pct": round(sum(pnls), 2) if pnls else None,
+                "avg_win_pct": round(sum(wins) / len(wins), 4) if wins else None,
+                "avg_loss_pct": round(sum(losses) / len(losses), 4) if losses else None,
+                "profit_factor": (
+                    round(sum(wins) / abs(sum(losses)), 3) if wins and losses and sum(losses) else None
+                ),
+                # Win rate this system must reach to break even at its current
+                # payoff ratio — the single most useful number on the page.
+                "breakeven_win_rate_pct": (
+                    round(100.0 * abs(sum(losses) / len(losses))
+                          / ((sum(wins) / len(wins)) + abs(sum(losses) / len(losses))), 2)
+                    if wins and losses else None
+                ),
+                "showing": len(rows),
+            }
         except Exception as exc:
             logger.error(f"History query failed: {exc}")
         finally:
             db.close()
-        return {"trades": rows, "total": len(rows)}
+        return {"trades": rows, "total": len(rows), "summary": summary}
 
     def get_symbols(self) -> dict:
         return {

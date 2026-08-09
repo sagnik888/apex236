@@ -52,9 +52,14 @@ Thumbs.db
 .env
 *.env
 broker_secrets.env
+upstox_secrets.env
 angel_instruments.json
 angel_session.json
 angel_cache/
+upstox_instruments.json
+upstox_session.json
+upstox_daily_login.json
+signals.json
 
 # Python & Logs
 __pycache__/

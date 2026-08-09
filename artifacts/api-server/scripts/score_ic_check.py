@@ -1,7 +1,3 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
-
 """Is the rebuilt score's IC real, or an artifact of cross-sectional correlation?
 
 A pooled t-stat assumes independent observations. These are not: on any given
@@ -11,7 +7,12 @@ is to compute the information coefficient WITHIN each period, then test the
 time series of per-period ICs. That reduces the effective sample to the number
 of periods, which is the honest unit of independence here.
 """
+
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
 
 import sys
 from pathlib import Path

@@ -8,6 +8,7 @@ for execution mode inspection (PAPER vs LIVE).
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Tuple, Optional
 import numpy as np
 import pandas as pd
@@ -29,8 +30,45 @@ def get_execution_mode() -> str:
 
 
 def is_live_execution() -> bool:
-    """Return True if the system is configured for live broker order placement."""
-    return get_execution_mode() == "LIVE"
+    """True only if live order placement is BOTH configured and armed.
+
+    `execution_mode` lives in apex_settings.json and is writable over HTTP. With
+    APEX_API_KEY unset (its state in every checked-in configuration) a settings
+    write alone could flip the system live, and this function is the only guard
+    between that flag and a real broker order — it is the sole gate consulted by
+    broker_angel.place_order/place_bracket_order and broker_upstox's equivalents.
+
+    So arming now needs a second factor that cannot be set over the network:
+    the APEX_ARM_LIVE=1 environment variable, chosen deliberately at process
+    start. A settings write can disarm (back to PAPER) but can never arm.
+    """
+    if get_execution_mode() != "LIVE":
+        return False
+    if os.getenv("APEX_ARM_LIVE", "").strip() not in ("1", "true", "TRUE", "yes", "YES"):
+        logger.warning(
+            "execution_mode is LIVE but APEX_ARM_LIVE is not set - refusing to place real orders. "
+            "Set APEX_ARM_LIVE=1 in the environment to arm live trading."
+        )
+        return False
+
+    # Third gate: the signal must be shown to beat a matched random-entry
+    # control by more than it costs to trade. Measured on a CLUSTERED (per
+    # trading day) t-statistic, because concurrent signals across 236
+    # correlated names are not independent observations and the naive
+    # per-signal t overstates significance by an order of magnitude.
+    #
+    # This is what stops the system from trading a strategy nobody has shown
+    # to work. Override with APEX_SKIP_EDGE_GATE=1 if you accept that.
+    try:
+        from edge_gate import edge_gate_passes
+        ok, why = edge_gate_passes()
+    except Exception as exc:
+        logger.error("Edge gate could not be evaluated (%s) - refusing to arm LIVE.", exc)
+        return False
+    if not ok:
+        logger.warning("Edge gate FAILED - refusing to place real orders: %s", why)
+        return False
+    return True
 
 
 def simulate(

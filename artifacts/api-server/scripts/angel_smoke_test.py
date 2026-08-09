@@ -1,7 +1,3 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
-
 """AngelOne SmartAPI read-only connectivity smoke test.
 
 Tests (in order):
@@ -18,7 +14,12 @@ Tests (in order):
 
 This script NEVER touches order endpoints. It is strictly read-only.
 """
+
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
 
 import json
 import os

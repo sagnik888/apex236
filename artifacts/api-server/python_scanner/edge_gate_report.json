@@ -1,0 +1,21 @@
+{
+  "generated_at": "2026-08-08T03:49:19.194380+05:30",
+  "trades": 1768,
+  "days": 63,
+  "apex_mean_pct": -0.5321,
+  "random_mean_pct": 0.0116,
+  "edge_pct": -0.0831,
+  "edge_t_stat": -0.417,
+  "edge_ci_low": -0.4734,
+  "edge_ci_high": 0.3072,
+  "naive_t_stat": -7.306,
+  "variance_inflation": 17.5,
+  "round_trip_cost_pct": 0.182,
+  "basis": "cash P&L from the trade log (option leg is not persisted; see OPT-04)",
+  "passes": false,
+  "reasons": [
+    "clustered t = -0.42; need >= 2.5 (naive t would be -7.31 - that is the number not to trust)",
+    "edge over random = -0.0831%/trade; must exceed the 0.182% round-trip cost",
+    "95% CI [-0.4734, +0.3072] includes zero"
+  ]
+}

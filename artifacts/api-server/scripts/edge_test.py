@@ -1,7 +1,3 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
-
 """Does the APEX entry signal have predictive edge at all?
 
 Two controls, both on the same cached Angel data:
@@ -17,7 +13,12 @@ Two controls, both on the same cached Angel data:
     expectancy match random, the entry logic is contributing nothing and no
     amount of target/stop tuning can create profit.
 """
+
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
 
 import sys
 from pathlib import Path
@@ -28,7 +29,9 @@ import pandas as pd
 from apex_python_scanner import ApexConfig, ApexScanner
 
 HERE = Path(__file__).resolve().parent
-CACHE = HERE / "angel_cache"
+CACHE = HERE.parent / "python_scanner" / "angel_cache"
+if not CACHE.exists():
+    raise SystemExit(f"cache directory not found: {CACHE}")
 RNG = np.random.default_rng(20260720)
 
 

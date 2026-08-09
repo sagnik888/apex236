@@ -99,6 +99,14 @@ def session_available() -> bool:
     Upstox uses OAuth: the token expires daily at ~03:30 IST and can only be
     renewed by a human completing the browser authorization flow.
     """
+    # Delegate to upstox_auth when available so the dispatcher, the dashboard
+    # and the login script all agree about one session, including its expiry.
+    try:
+        from upstox_auth import get_upstox_auth
+        st = get_upstox_auth().status()
+        return bool(st.get("connected"))
+    except Exception:
+        pass
     try:
         env = load_credentials()
     except UpstoxCredentialsMissing:
@@ -202,28 +210,16 @@ class UpstoxClient:
             return False
 
     def ensure_session(self) -> None:
+        from upstox_auth import get_upstox_auth
         with self._auth_lock:
-            if self._access_token and self._probe_session():
+            auth = get_upstox_auth()
+            # If upstox_auth says we're connected, adopt its token.
+            if auth.status()["connected"]:
+                self._access_token = auth.access_token
                 return
-            if SESSION_CACHE.exists():
-                try:
-                    saved = json.loads(SESSION_CACHE.read_text(encoding="utf-8"))
-                    if self._session_is_valid(saved) and saved.get("access_token"):
-                        self._access_token = saved["access_token"]
-                        if self._probe_session():
-                            logger.info("Upstox session reused from cache")
-                            return
-                        self._access_token = None
-                except Exception:
-                    self._access_token = None
-            if self._env.get("UPSTOX_ACCESS_TOKEN"):
-                self._access_token = self._env["UPSTOX_ACCESS_TOKEN"]
-                if self._probe_session():
-                    self._save_session()
-                    return
-            if not self._access_token:
-                logger.warning("No active Upstox access token found. Provide UPSTOX_ACCESS_TOKEN in upstox_secrets.env or run OAuth flow.")
-
+            # If not, clear our own copy.
+            self._access_token = None
+            logger.warning("No active Upstox access token found. Provide UPSTOX_ACCESS_TOKEN in upstox_secrets.env or run OAuth flow.")
     def _probe_session(self) -> bool:
         if not self._access_token:
             return False
@@ -434,6 +430,8 @@ class UpstoxClient:
                 r = self._http.get(url, headers=self._headers(), timeout=20)
                 if r.status_code == 401 and attempt == 0:
                     self._access_token = None
+                    from upstox_auth import get_upstox_auth
+                    get_upstox_auth().invalidate(f"API returned 401 Unauthorized for get_quote")
                     self.ensure_session()
                     continue
                 if r.status_code == 429:

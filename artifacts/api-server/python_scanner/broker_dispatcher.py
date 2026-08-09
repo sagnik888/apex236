@@ -75,6 +75,17 @@ def symbol_slot(symbol: str) -> int:
         return slots[bare]
     return zlib.crc32(symbol.encode("utf-8")) % 2
 
+
+def _upstox_auth_status() -> dict:
+    """Upstox session state, or a safe stub when the module is unavailable."""
+    try:
+        from upstox_auth import get_upstox_auth
+        return get_upstox_auth().status()
+    except Exception as exc:
+        return {"broker": "upstox", "connected": False, "auth_required": True,
+                "reason": f"auth module unavailable: {exc}", "expiring_soon": False}
+
+
 logger = logging.getLogger(__name__)
 IST_TZ = ZoneInfo("Asia/Kolkata")
 
@@ -106,13 +117,27 @@ class MultiBrokerDispatcher:
         split = self.split_symbols(list(universe))
         angel_count, upstox_count = len(split["angel"]), len(split["upstox"])
         total = angel_count + upstox_count
+        options_ok, options_reason = self.options_provider_ready()
+
+        # Roles, not a load ratio. Equity spot is Angel's job; options and
+        # fundamentals are Upstox's. Reporting a single "50/50" number hid the
+        # fact that these can fail independently — and they usually do, since
+        # Angel re-mints its own session via TOTP while Upstox needs a daily
+        # human OAuth step.
         if total == 0:
-            ratio = "NO BROKER AVAILABLE"
-        elif angel_count and upstox_count:
-            ratio = f"{round(100 * angel_count / total)}/{round(100 * upstox_count / total)} Angel/Upstox"
+            ratio = "NO EQUITY DATA PROVIDER"
+        elif angel_count:
+            ratio = f"Equity: AngelOne ({angel_count}) | Options: {'Upstox' if options_ok else 'UNAVAILABLE'}"
         else:
-            ratio = "100% Angel One" if angel_count else "100% Upstox"
+            ratio = f"Equity: Upstox ({upstox_count}, degraded) | Options: {'Upstox' if options_ok else 'UNAVAILABLE'}"
         return {
+            "equity_provider": "angel" if angel_count else ("upstox" if upstox_count else None),
+            "options_provider": "upstox" if options_ok else None,
+            "options_available": options_ok,
+            "options_status": options_reason,
+            # Full Upstox session lifecycle so the dashboard can warn BEFORE the
+            # daily 03:30 IST expiry rather than after an order fails.
+            "upstox_auth": _upstox_auth_status(),
             "balance_mode": self.balance_mode,
             "equity_broker": self.equity_broker,
             "options_broker": self.options_broker,
@@ -137,25 +162,67 @@ class MultiBrokerDispatcher:
         }
 
     def split_symbols(self, symbols: list[str]) -> dict[str, list[str]]:
-        """Divide a symbol list across active brokers for load balanced prefetching."""
+        """Route EQUITY/SPOT candle history. Angel One owns this entirely.
+
+        This is a role split, not a load split, and it is the accurate one:
+
+        * **AngelOne — all equity spot / OHLCV, all 236 symbols, all timeframes.**
+          Angel's SmartAPI `getCandleData` serves ONE_MINUTE / FIVE_MINUTE /
+          FIFTEEN_MINUTE / ONE_HOUR / ONE_DAY, which is everything the scanner
+          asks for.
+        * **Upstox — options and fundamentals only** (contract master, strike
+          ladders, option chains, quotes, and the option order path). See
+          `options_broker`.
+
+        The previous 50/50 equity split could never have worked: Upstox API v2's
+        `/historical-candle` accepts only 1minute / 30minute / day / week /
+        month, so every "15minute" and "60minute" request for its half of the
+        universe failed, and those 118 symbols silently fell through to delayed
+        Yahoo data until the failure counter tripped. Sending all equity to the
+        broker that can actually serve it removes a whole class of silent gaps.
+
+        `balance_mode = "upstox_primary"` still forces equity to Upstox for
+        operators who want it, but it is not the default and is not recommended
+        until the client moves to the v3 intraday endpoint.
+        """
         angel_ok = angel_available() and self._angel_failures < 5
         upstox_ok = upstox_available() and self._upstox_failures < 5
 
-        if self.balance_mode == "split" and angel_ok and upstox_ok:
-            # Partition by the SAME stable function that fetch_ohlcv's failover
-            # order uses. Index parity was used here while failover used
-            # hash(symbol), so the two disagreed on roughly half the universe:
-            # a symbol prefetched into Angel's store would be tried against
-            # Upstox first on a live fetch.
-            angel_syms = [s for s in symbols if symbol_slot(s) == 0]
-            upstox_syms = [s for s in symbols if symbol_slot(s) == 1]
-            return {"angel": angel_syms, "upstox": upstox_syms}
-        elif upstox_ok and (not angel_ok or self.balance_mode == "upstox_primary"):
+        if self.balance_mode == "upstox_primary" and upstox_ok:
             return {"angel": [], "upstox": list(symbols)}
-        elif angel_ok:
+        if angel_ok:
             return {"angel": list(symbols), "upstox": []}
-        else:
-            return {"angel": [], "upstox": []}
+        # Angel down: Upstox equity is degraded (no intraday intervals) but is
+        # better than nothing for the macro timeframes.
+        if upstox_ok:
+            logger.warning(
+                "Angel unavailable; falling back to Upstox for equity history. "
+                "Upstox v2 cannot serve 15m/1h intervals, so intraday coverage will be incomplete."
+            )
+            return {"angel": [], "upstox": list(symbols)}
+        return {"angel": [], "upstox": []}
+
+    def options_provider_ready(self) -> tuple[bool, str]:
+        """Is the options/fundamentals provider usable right now?
+
+        Options, strike ladders and fundamentals all come from Upstox, so this
+        is a distinct health question from equity data and must be reported
+        separately — an Angel-only system has full price data and zero options
+        capability, which the old single 'brokers connected' flag could not express.
+        """
+        if not upstox_creds_available():
+            return False, "no Upstox credentials"
+        if not upstox_session_available():
+            return False, "no Upstox access token (run upstox_login.py)"
+        if self._upstox_failures >= 5:
+            return False, f"Upstox failing ({self._upstox_failures} consecutive errors)"
+        try:
+            _eq, fo = get_upstox_client().instrument_map()
+            if not fo:
+                return False, "Upstox instrument master empty"
+        except Exception as exc:
+            return False, f"Upstox instrument master unavailable: {exc}"
+        return True, "OK"
 
     def fetch_ohlcv(
         self,

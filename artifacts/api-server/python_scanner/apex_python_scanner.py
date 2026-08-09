@@ -257,6 +257,12 @@ class ActiveTrade:
     stop_mode: str
     option_type: str = ""
     option_strike: float = math.nan
+    option_entry: float = math.nan
+    option_sl1: float = math.nan
+    option_tsl: float = math.nan
+    option_tp1: float = math.nan
+    option_symbol: str = ""
+    option_ltp: float = math.nan
     signal_score: float = 0.0
     t1_hit: bool = False
     t2_hit: bool = False
@@ -264,6 +270,8 @@ class ActiveTrade:
     profit_locked: bool = False
     peak_price: float = math.nan
     trough_price: float = math.nan
+    peak_option_price: float = math.nan
+    trough_option_price: float = math.nan
     exit_confirmation_count: int = 0
     trade_style: str = "swing"
 
@@ -1836,6 +1844,15 @@ def _stop_fill(trade: ActiveTrade, row: pd.Series, config: ApexConfig) -> Option
                 return open_px, active_reason + " Gap"
             if high_px >= active_stop:
                 return active_stop, active_reason
+                
+        # DUAL TRACKING: Exit if option premium hits SL/TSL
+        if not np.isnan(trade.option_ltp) and trade.option_ltp > 0:
+            opt_trail_active = config.use_trail and trade.option_tsl > trade.option_sl1
+            opt_active_stop = max(trade.option_sl1, trade.option_tsl) if opt_trail_active else trade.option_sl1
+            opt_active_reason = "Option TSL" if opt_trail_active else "Option Hard SL1"
+            if trade.option_ltp <= opt_active_stop:
+                return trade.option_ltp, opt_active_reason
+
         return None
 
     # Pine-compatible conservative ordering.
@@ -1851,6 +1868,15 @@ def _stop_fill(trade: ActiveTrade, row: pd.Series, config: ApexConfig) -> Option
         return trade.tsl, active_reason
     if trail_active and (not is_long) and high_px > trade.tsl:
         return trade.tsl, active_reason
+        
+    # DUAL TRACKING: Exit if option premium hits SL/TSL
+    if not np.isnan(trade.option_ltp) and trade.option_ltp > 0:
+        opt_trail_active = config.use_trail and trade.option_tsl > trade.option_sl1
+        opt_active_stop = max(trade.option_sl1, trade.option_tsl) if opt_trail_active else trade.option_sl1
+        opt_active_reason = "Option TSL" if opt_trail_active else "Option Hard SL1"
+        if trade.option_ltp <= opt_active_stop:
+            return trade.option_ltp, opt_active_reason
+            
     return None
 
 
@@ -1876,6 +1902,7 @@ class ApexScanner:
         exchange: str = "NSE",
         asset_type: str = "",
         last_bar_is_forming: bool = False,
+        live_option_ltp: float = math.nan,
     ) -> SymbolResult:
         cfg = self.config
         # When the caller reports the final bar is still forming and the config
@@ -2108,6 +2135,25 @@ class ApexScanner:
                         active.t2_hit = True
                     if float(row["low"]) <= active.tp3:
                         active.t3_hit = True
+                # DUAL TRACKING: Update live option premium on the forming bar
+                if i == len(df) - 1 and last_bar_is_forming:
+                    if np.isnan(live_option_ltp) and active.option_symbol:
+                        try:
+                            from broker_upstox import get_upstox_client
+                            import asyncio
+                            # We can just use the synchronous get_quote
+                            upstox = get_upstox_client()
+                            quotes = upstox.get_quote([active.option_symbol])
+                            if quotes and active.option_symbol in quotes:
+                                live_option_ltp = float(quotes[active.option_symbol].get("last_price", math.nan))
+                        except Exception as e:
+                            pass
+                            
+                    active.option_ltp = live_option_ltp
+                    if not np.isnan(live_option_ltp) and live_option_ltp > 0:
+                        if np.isnan(active.peak_option_price):
+                            active.peak_option_price = active.option_entry
+                        active.peak_option_price = max(active.peak_option_price, live_option_ltp)
 
                 stop_event = _stop_fill(active, row, cfg)
                 exit_price: Optional[float] = None
@@ -2170,6 +2216,22 @@ class ApexScanner:
                                 locked_price = step_price + float(row["atr"])
                                 locked_price = min(locked_price, active.entry_price)  # Never lock above entry
                                 active.tsl = min(active.tsl, locked_price)
+                                
+                        # DUAL TRACKING: Trail option_tsl based on peak_option_price
+                        if not np.isnan(active.option_ltp) and active.option_ltp > 0:
+                            if not np.isnan(active.option_tsl):
+                                # Trail by tracking max premium high
+                                if np.isnan(active.peak_option_price):
+                                    active.peak_option_price = active.option_entry
+                                opt_profit = active.peak_option_price - active.option_entry
+                                # Options are always LONG (buy to open), so we trail UP
+                                if current_rr >= cfg.trail_start_r:
+                                    opt_risk = abs(active.option_entry - active.option_sl1)
+                                    loose = cfg.trail_mult * (1.5 if bool(row["high_volatility"]) and not active.t2_hit else 1.3 if active.t2_hit else 1.0)
+                                    # We use spot ATR for volatility but translated by delta to option price space
+                                    delta = 0.5
+                                    opt_loose = float(row["atr"]) * delta * loose
+                                    active.option_tsl = max(active.option_tsl, active.peak_option_price - opt_loose)
 
                     # Momentum exit is evaluated at bar close. Applies to every
                     # style: an intraday trade whose thesis has broken should

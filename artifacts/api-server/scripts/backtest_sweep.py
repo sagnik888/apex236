@@ -1,7 +1,3 @@
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
-
 """Parameter sweep over cached Angel history with a real cost model.
 
 Answers: does an intraday 15m/1h strategy targeting 0.75-1% moves at a
@@ -18,7 +14,12 @@ Cost model (NSE equity intraday / MIS, Zerodha-style, per round trip):
 Slippage is modelled separately and dominates: entries/exits are market
 orders on a 236-name universe including midcaps.
 """
+
 from __future__ import annotations
+
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'python_scanner'))
 
 import sys
 import time
@@ -30,7 +31,9 @@ import pandas as pd
 from apex_python_scanner import ApexConfig, ApexScanner
 
 HERE = Path(__file__).resolve().parent
-CACHE = HERE / "angel_cache"
+CACHE = HERE.parent / "python_scanner" / "angel_cache"
+if not CACHE.exists():
+    raise SystemExit(f"cache directory not found: {CACHE}")
 
 STATUTORY_ROUND_TRIP_PCT = 0.082      # charges, see docstring
 SLIPPAGE_PER_SIDE_PCT = 0.05          # base case; swept below
