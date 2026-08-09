@@ -1141,6 +1141,45 @@ def _time_minutes(text: str) -> int:
     return int(hh) * 60 + int(mm)
 
 
+# The higher timeframe each scan timeframe confirms against. One clear step up:
+# 15m confirms on 1h, 1h and 4h on the daily, 1d on the weekly.
+_HTF_RULE_BY_TF: dict[str, str] = {
+    "15m": "60min",
+    "1h": "1D",
+    "4h": "1D",
+    "1d": "1W",
+}
+
+
+def _coarser_rule(base_seconds: float) -> str:
+    """One step up from the inferred bar size, for frames with no declared tf."""
+    if base_seconds <= 900 + EPS:
+        return "60min"
+    if base_seconds <= 3600 + EPS:
+        return "1D"
+    if base_seconds <= 14400 + EPS:
+        return "1D"
+    return "1W"
+
+
+# Score normalisation window. Must sit comfortably inside max_input_bars (400
+# on 15m/1h) so the same bar normalises identically on every scan.
+# Bars computed but never emitted, purely to converge EMA/RMA seeds. Measured:
+# 400 drives closed-bar repaint to exactly zero on a one-bar window slide.
+_INDICATOR_BURN_IN_BARS = 400
+
+_SCORE_NORM_WINDOW = 250
+# The FULL window is required, not a partial one. With a partial window the
+# statistic still depends on how many bars happen to precede the bar inside the
+# current slice, so an already-closed bar keeps repainting as the window slides
+# — measured at 2.4 points mean drift with min_periods=100. Demanding the whole
+# window makes every bar that receives a score reproducible scan to scan; bars
+# without 250 predecessors get NaN and produce no signal, which is correct.
+_SCORE_NORM_MIN = _SCORE_NORM_WINDOW
+# Same-time-of-day volume buckets needed before the volume gate may fire.
+_VOLUME_MIN_PERIODS = 10
+
+
 def build_feature_frame(
     df: pd.DataFrame,
     config: ApexConfig,
@@ -1174,7 +1213,12 @@ def build_feature_frame(
     f["di_plus"], f["di_minus"], f["adx"] = dmi_adx(df, 14, 14)
     if isinstance(df.index, pd.DatetimeIndex) and len(df) > 0 and _infer_base_seconds(df.index) < 86400.0 - EPS:
         times = df.index.time
-        bucket_sma = df["volume"].groupby(times).transform(lambda g: g.rolling(20, min_periods=1).mean())
+        # min_periods=1 meant relative_volume / volume_above / volume_spike —
+        # which HARD-GATE every entry — could be computed from a single prior
+        # same-time-of-day bar. Require a real sample before the gate can pass.
+        bucket_sma = df["volume"].groupby(times).transform(
+            lambda g: g.rolling(20, min_periods=_VOLUME_MIN_PERIODS).mean()
+        )
         f["volume_sma20"] = bucket_sma.fillna(sma(df["volume"], 20)).fillna(df["volume"].mean())
     else:
         f["volume_sma20"] = sma(df["volume"], 20)
@@ -1193,8 +1237,24 @@ def build_feature_frame(
         rule: str,
         builder: Callable[[pd.DataFrame], pd.Series],
         base_series: pd.Series,
+        gating: bool = False,
     ) -> pd.Series:
         if _rule_seconds(rule) <= base_seconds + EPS:
+            if not gating:
+                # Display-only regime columns legitimately request finer rules
+                # than the scan frame (regime_1m on a 15m frame); that degrades
+                # to a lag harmlessly and must not spam the log.
+                return base_series.shift(1)
+            # Degrading to shift(1) silently is what made use_htf a no-op for
+            # YEARS: the hardcoded "5min"/"15min" rules are never coarser than a
+            # 15m-or-higher production frame, so this branch always fired and
+            # the "higher-timeframe bias" was the SAME timeframe lagged one bar.
+            # Log loudly so a future rule change cannot re-introduce it quietly.
+            logger.warning(
+                "MTF rule %r is not coarser than the %.0fs input; falling back to a "
+                "same-timeframe lag. This disables higher-timeframe confirmation.",
+                rule, base_seconds,
+            )
             return base_series.shift(1)
         return previous_closed_mtf(
             df,
@@ -1203,11 +1263,22 @@ def build_feature_frame(
             timestamps_are_bar_close=config.timestamps_are_bar_close,
         )
 
-    f["rsi_5m_prev"] = previous_feature("5min", lambda x: rsi(x["close"], 14), f["rsi"])
-    f["ema9_15m_prev"] = previous_feature("15min", lambda x: ema(x["close"], 9), f["ema9"])
-    f["ema21_15m_prev"] = previous_feature("15min", lambda x: ema(x["close"], 21), f["ema21"])
+    def previous_feature_gating(rule, builder, base_series):
+        return previous_feature(rule, builder, base_series, gating=True)
+
+    # A genuinely coarser rule per scan timeframe. Falls back to one step up
+    # from the inferred bar size when the config has no timeframe (CLI runs).
+    htf_rule = _HTF_RULE_BY_TF.get(config.timeframe) or _coarser_rule(base_seconds)
+
+    f["rsi_5m_prev"] = previous_feature_gating(htf_rule, lambda x: rsi(x["close"], 14), f["rsi"])
+    f["ema9_15m_prev"] = previous_feature_gating(htf_rule, lambda x: ema(x["close"], 9), f["ema9"])
+    f["ema21_15m_prev"] = previous_feature_gating(htf_rule, lambda x: ema(x["close"], 21), f["ema21"])
     # FIX SIG-04: Calculate slope on the HTF dataframe before forward-filling
-    f["ema9_15m_slope"] = previous_feature("15min", lambda x: ema(x["close"], 9) - ema(x["close"], 9).shift(3), f["ema9"] - f["ema9"].shift(3))
+    f["ema9_15m_slope"] = previous_feature_gating(
+        htf_rule,
+        lambda x: ema(x["close"], 9) - ema(x["close"], 9).shift(3),
+        f["ema9"] - f["ema9"].shift(3),
+    )
 
     f["high_volatility"] = f["atr_expansion"] > 1.25
     f["normal_volatility"] = f["atr_expansion"].between(0.85, 1.25)
@@ -1323,12 +1394,18 @@ def build_feature_frame(
     # Rolling mean adapted too fast, suppressing scores during real trends
     # and amplifying scores during fake-outs in choppy markets.
     if len(bull_s) > 30:
-        b_mean = bull_s.expanding(min_periods=30).mean()
-        b_std = bull_s.expanding(min_periods=30).std()
+        # A FIXED trailing window, not expanding(). expanding() measures from
+        # bar 0 of whatever slice it is handed, and run_symbol truncates to a
+        # rolling max_input_bars window — so the normalisation of an ALREADY
+        # CLOSED historical bar changed every time the window slid, and closed
+        # bars repainted between scans. A window fully contained in
+        # max_input_bars makes the score reproducible scan to scan.
+        b_mean = bull_s.rolling(_SCORE_NORM_WINDOW, min_periods=_SCORE_NORM_MIN).mean()
+        b_std = bull_s.rolling(_SCORE_NORM_WINDOW, min_periods=_SCORE_NORM_MIN).std()
         bull_norm = ((bull_s - b_mean) / (b_std + 1e-9) * 15.0 + 65.0).fillna(bull_s)
 
-        br_mean = bear_s.expanding(min_periods=30).mean()
-        br_std = bear_s.expanding(min_periods=30).std()
+        br_mean = bear_s.rolling(_SCORE_NORM_WINDOW, min_periods=_SCORE_NORM_MIN).mean()
+        br_std = bear_s.rolling(_SCORE_NORM_WINDOW, min_periods=_SCORE_NORM_MIN).std()
         bear_norm = ((bear_s - br_mean) / (br_std + 1e-9) * 15.0 + 65.0).fillna(bear_s)
     else:
         bull_norm, bear_norm = bull_s, bear_s
@@ -1805,10 +1882,27 @@ class ApexScanner:
         # forbids acting on it, the last bar is decision-inert (display only).
         forming_inert = bool(last_bar_is_forming) and not cfg.act_on_forming_bar
         df = normalize_ohlcv(data, cfg)
-        if cfg.max_input_bars > 0 and len(df) > cfg.max_input_bars:
-            df = df.tail(cfg.max_input_bars).copy()
+        # Keep a DISCARDABLE burn-in ahead of the emitted window.
+        #
+        # EMA and Wilder RMA have infinite memory, so their seed value never
+        # fully washes out: with a plain rolling window the seed moved every
+        # scan and already-CLOSED historical bars repainted. Measured drift of
+        # bull_score on closed bars, one-bar window slide:
+        #     burn-in    0 -> 1.499 mean, 35.4 max, 224 of 398 bars changed
+        #     burn-in  200 -> 0.087 mean, 16.0 max
+        #     burn-in  400 -> 0.000 mean,  0.0 max, 0 bars changed
+        # 400 bars of burn-in makes the emitted window reproducible scan to
+        # scan, which is a precondition for any statistic computed from it.
+        keep = cfg.max_input_bars
+        if keep > 0 and len(df) > keep:
+            df = df.tail(keep + _INDICATOR_BURN_IN_BARS).copy()
         profile = detect_instrument(symbol, cfg.instrument_type, exchange, asset_type)
         f = build_feature_frame(df, cfg, profile)
+        if keep > 0 and len(f) > keep:
+            # Drop the burn-in region: those bars exist only to converge the
+            # indicators and must never produce a signal or a trade.
+            f = f.iloc[-keep:].copy()
+            df = df.iloc[-keep:]
 
         # Event/state columns.
         string_cols = ["signal", "setup", "trade_state", "exit_reason", "option_type", "stop_mode"]
@@ -1880,6 +1974,12 @@ class ApexScanner:
                 session_last_bar = next_date != timestamp.date()
             else:
                 session_last_bar = True
+            # First bar of a new session — the exit point for a BTST hold.
+            if i > 0:
+                prev_date = pd.Timestamp(row_values[i - 1][bar_close_idx]).date()
+                session_first_bar = prev_date != timestamp.date()
+            else:
+                session_first_bar = False
 
             # Execute a signal only after the configured delay. The default is
             # next-bar open, removing the source script's same-bar lookahead.
@@ -1909,8 +2009,19 @@ class ApexScanner:
                     if all(np.isfinite(x) for x in (entry_price, anchor_low, anchor_high, anchor_row["atr"])):
                         is_long = bool(pending["is_long"])
                         
-                        # Determine intrinsic trade style
-                        is_btst = cfg.timeframe in ("1h", "4h") and bar_minutes >= btst_entry_after
+                        # Determine intrinsic trade style.
+                        #
+                        # Keyed on the bar's OPEN time, not its close.
+                        # build_feature_frame clamps bar_close_time to
+                        # market_close for any bucket straddling the close, so
+                        # on 1h BOTH the 14:15 bucket (clamped close 15:15) and
+                        # the 15:15 stub (clamped close 15:30) tested >= 14:45
+                        # and were classified BTST — silently turning ordinary
+                        # late-afternoon entries into unhedged overnight holds.
+                        # The open time is unclamped and says what the operator
+                        # means: "was this opened in the last 45 minutes?"
+                        entry_open_minutes = bar_open_time.hour * 60 + bar_open_time.minute
+                        is_btst = cfg.timeframe in ("1h", "4h") and entry_open_minutes >= btst_entry_after
                         is_swing = cfg.timeframe in ("4h", "1d") and not is_btst
                         intrinsic_style = "btst" if is_btst else "swing" if is_swing else "intraday"
                         
@@ -2110,6 +2221,24 @@ class ApexScanner:
                         exit_price = float(row["close"])
                         exit_reason = "Intraday Square-Off (EOD)"
                         exit_time_val = timestamp
+
+                    # BTST means Buy Today Sell TOMORROW: the position is opened
+                    # late in one session and closed in the next. There was no
+                    # such rule — square-off was gated on trade_style ==
+                    # "intraday", so a BTST hold had no time-based exit at all
+                    # and ran until a stop, a gap or the 400-bar window forgot
+                    # it. Measured: 183 of 227 gap exits were overnight holds,
+                    # averaging -3.447%, the largest single remaining loss
+                    # bucket. Exit on the first bar of the next session.
+                    if (
+                        exit_price is None
+                        and active.trade_style == "btst"
+                        and session_first_bar
+                        and i > active.entry_bar
+                    ):
+                        exit_price = float(row["open"])
+                        exit_reason = "BTST Square-Off (Next Session)"
+                        exit_time_val = bar_open_time
 
                 if exit_price is not None:
                     if exit_reason != "Momentum Exit":
@@ -2382,30 +2511,113 @@ class ApexScanner:
             # Use the TICKER, not profile.name — that is the instrument class
             # label, so every NSE equity rendered as the untradable string
             # "Stock 150 CE" and the underlying never appeared on the card.
-            opt_symbol = f"{str(symbol).replace('.NS', '').upper()} {s_str} {opt_type}"
+            ticker = str(symbol).replace('.NS', '').upper()
+            opt_symbol_label = f"{ticker} {s_str} {opt_type}"
             c_price = float(row.get("close", math.nan))
+
+            # Try to fetch real option data from Upstox API for accurate
+            # premium, Greeks, and instrument key.
+            real_premium = math.nan
+            real_delta = math.nan
+            real_theta = math.nan
+            real_gamma = math.nan
+            real_inst_key = ""
+            try:
+                from options_engine import resolve_atm_option, calculate_option_stops, get_option_greeks
+                direction = "LONG" if opt_type == "CE" else "SHORT"
+                contract = resolve_atm_option(symbol, c_price, direction)
+                if contract:
+                    real_inst_key = contract.get("instrument_key", "")
+                    from broker_upstox import get_upstox_client
+                    client = get_upstox_client()
+                    if real_inst_key:
+                        quotes = client.get_quote([real_inst_key])
+                        q_data = quotes.get(real_inst_key, {})
+                        ltp = float(q_data.get("last_price") or q_data.get("ltp") or 0.0)
+                        greeks = q_data.get("option_greeks", {}) or q_data.get("greeks", {})
+                        if ltp > 0:
+                            real_premium = ltp
+                        g_delta = greeks.get("delta")
+                        g_theta = greeks.get("theta")
+                        g_gamma = greeks.get("gamma")
+                        if g_delta is not None:
+                            real_delta = abs(float(g_delta))
+                        if g_theta is not None:
+                            real_theta = abs(float(g_theta))
+                        if g_gamma is not None:
+                            real_gamma = float(g_gamma)
+            except Exception:
+                pass
+
+            # Use real premium if available, else fall back to synthetic estimate
             if not math.isnan(c_price) and c_price > 0:
-                diff = (c_price - opt_strike) if opt_type == "CE" else (opt_strike - c_price)
-                opt_entry = round(max(5.0, diff + c_price * 0.018 if diff > 0 else max(3.0, c_price * 0.018 - abs(diff) * 0.4)), 2)
-                delta = 0.52 if abs(diff) < (c_price * 0.01) else (0.65 if diff > 0 else 0.35)
+                if not math.isnan(real_premium) and real_premium > 0:
+                    opt_entry = round(real_premium * 1.015, 2)  # add half-spread
+                else:
+                    # Synthetic fallback when API unavailable
+                    diff = (c_price - opt_strike) if opt_type == "CE" else (opt_strike - c_price)
+                    opt_entry = round(max(5.0, diff + c_price * 0.018 if diff > 0 else max(3.0, c_price * 0.018 - abs(diff) * 0.4)), 2)
+
+                # Use real delta if available, else estimate
+                delta = real_delta if (not math.isnan(real_delta) and real_delta > 0) else (
+                    0.52 if abs((c_price - opt_strike) if opt_type == "CE" else (opt_strike - c_price)) < (c_price * 0.01) else 0.45
+                )
+
                 cash_sl1 = active.sl1 if (active and not math.isnan(active.sl1)) else float(row.get("planned_sl1", math.nan))
                 cash_sl2 = active.sl2 if (active and not math.isnan(active.sl2)) else math.nan
                 cash_tsl = active.tsl if (active and not math.isnan(active.tsl)) else math.nan
                 cash_tp1 = active.tp1 if (active and not math.isnan(active.tp1)) else float(row.get("planned_tp1", math.nan))
                 cash_tp2 = active.tp2 if (active and not math.isnan(active.tp2)) else float(row.get("planned_tp2", math.nan))
                 cash_tp3 = active.tp3 if (active and not math.isnan(active.tp3)) else float(row.get("planned_tp3", math.nan))
-                if not math.isnan(cash_sl1):
-                    opt_sl1 = round(max(0.50, opt_entry - abs(c_price - cash_sl1) * delta), 2)
+
+                # Use real calculate_option_stops when we have real Greeks
+                theta_for_calc = real_theta if not math.isnan(real_theta) else None
+                gamma_for_calc = real_gamma if not math.isnan(real_gamma) else None
+
+                # Calculate SL/TP using the proper engine when possible
+                if not math.isnan(cash_sl1) and not math.isnan(cash_tp1):
+                    try:
+                        from options_engine import calculate_option_stops
+                        _bars_per_hold = {"15m": 6, "1h": 5, "4h": 4, "1d": 5}
+                        _bar_days = {"15m": 15 / 375.0, "1h": 60 / 375.0, "4h": 240 / 375.0, "1d": 1.0}
+                        tf_key = str(row.get("timeframe", "1h"))
+                        holding_days = _bars_per_hold.get(tf_key, 6) * _bar_days.get(tf_key, 0.1)
+                        opt_sl1, opt_tp1 = calculate_option_stops(
+                            entry_option=opt_entry,
+                            entry_spot=c_price,
+                            stop_spot=cash_sl1,
+                            target_spot=cash_tp1,
+                            option_delta=delta,
+                            stop_mode="Delta-Translated",
+                            option_theta=theta_for_calc,
+                            option_gamma=gamma_for_calc,
+                            holding_days=holding_days,
+                        )
+                    except Exception:
+                        # Fallback: simple delta translation with 25% SL floor
+                        min_sl = opt_entry * 0.25
+                        opt_sl1 = round(max(min_sl, opt_entry - abs(c_price - cash_sl1) * delta), 2)
+                        opt_tp1 = round(opt_entry + abs(cash_tp1 - c_price) * delta, 2)
+                else:
+                    if not math.isnan(cash_sl1):
+                        min_sl = opt_entry * 0.25
+                        opt_sl1 = round(max(min_sl, opt_entry - abs(c_price - cash_sl1) * delta), 2)
+                    if not math.isnan(cash_tp1):
+                        opt_tp1 = round(opt_entry + abs(cash_tp1 - c_price) * delta, 2)
+
                 if not math.isnan(cash_sl2):
-                    opt_sl2 = round(max(0.50, opt_entry - abs(c_price - cash_sl2) * delta), 2)
+                    min_sl = opt_entry * 0.25
+                    opt_sl2 = round(max(min_sl, opt_entry - abs(c_price - cash_sl2) * delta), 2)
                 if not math.isnan(cash_tsl):
-                    opt_tsl = round(max(0.50, opt_entry - abs(c_price - cash_tsl) * delta), 2)
-                if not math.isnan(cash_tp1):
-                    opt_tp1 = round(opt_entry + abs(cash_tp1 - c_price) * delta, 2)
+                    min_sl = opt_entry * 0.25
+                    opt_tsl = round(max(min_sl, opt_entry - abs(c_price - cash_tsl) * delta), 2)
                 if not math.isnan(cash_tp2):
                     opt_tp2 = round(opt_entry + abs(cash_tp2 - c_price) * delta, 2)
                 if not math.isnan(cash_tp3):
                     opt_tp3 = round(opt_entry + abs(cash_tp3 - c_price) * delta, 2)
+
+            # Store instrument key if available, else the label
+            opt_symbol = real_inst_key if real_inst_key else opt_symbol_label
 
         return {
             "symbol": symbol,

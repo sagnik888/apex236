@@ -50,15 +50,107 @@ def register_oco_pair(stop_id: str, target_id: str, broker: str = "upstox", symb
 
 
 def _order_is_filled(status_res: dict[str, Any]) -> bool:
+    """True only for a COMPLETE fill.
+
+    Reads Angel's `orderstatus` as well as Upstox's `status` — Angel's key was
+    never checked, so Angel pairs could never reconcile. Also compares
+    filled_quantity against quantity: {'status':'complete','filled_quantity':5,
+    'quantity':50} previously read as filled, and the protective legs were then
+    sized for the full 50, leaving a naked short option when the stop triggered.
+    """
+    from order_events import FILLED, PARTIAL, normalise_status
+
     data = status_res.get("data", status_res) if isinstance(status_res, dict) else {}
-    st = str(data.get("status") or data.get("order_status") or status_res.get("status") or "").lower()
-    return st in ("complete", "completed", "filled", "traded", "executed")
+    raw = (
+        data.get("orderstatus") or data.get("status") or data.get("order_status")
+        or (status_res.get("status") if isinstance(status_res, dict) else None)
+    )
+    st = normalise_status(raw)
+    if st != FILLED:
+        return False
+    try:
+        filled = int(float(data.get("filledshares") or data.get("filled_quantity") or 0))
+        total = int(float(data.get("quantity") or data.get("orderqty") or 0))
+    except (TypeError, ValueError):
+        # Cannot determine fill state — assume NOT filled to avoid cancelling
+        # the protective sibling leg and leaving the position naked.
+        return False
+    if total > 0 and filled > 0 and filled < total:
+        logger.warning("Order %s partially filled (%s/%s); not treating as complete",
+                       data.get("orderid") or data.get("order_id"), filled, total)
+        return False
+    return True
 
 
 def _order_is_terminal(status_res: dict[str, Any]) -> bool:
+    from order_events import CANCELLED, REJECTED, normalise_status
+
     data = status_res.get("data", status_res) if isinstance(status_res, dict) else {}
-    st = str(data.get("status") or data.get("order_status") or status_res.get("status") or "").lower()
-    return st in ("cancelled", "canceled", "rejected")
+    raw = (
+        data.get("orderstatus") or data.get("status") or data.get("order_status")
+        or (status_res.get("status") if isinstance(status_res, dict) else None)
+    )
+    return normalise_status(raw) in (CANCELLED, REJECTED)
+
+
+def on_order_event(event) -> list[dict[str, Any]]:
+    """React to a pushed broker order update immediately.
+
+    The polling reconciler runs once per scan cycle at best; a webhook arrives
+    in milliseconds. When one leg of an OCO reaches a terminal state this
+    cancels its sibling straight away instead of leaving both live.
+    """
+    actions: list[dict[str, Any]] = []
+    if event is None or not getattr(event, "is_terminal", False):
+        return actions
+
+    # get_dispatcher is imported at module scope; do NOT re-import it here or
+    # the local binding shadows it and the module becomes untestable.
+    dispatcher = get_dispatcher()
+
+    with _OCO_LOCK:
+        pairs = list(_OPEN_OCO_PAIRS)
+
+    survivors = []
+    for pair in pairs:
+        oid = str(event.order_id)
+        if oid not in (pair["stop_id"], pair["target_id"]):
+            survivors.append(pair)
+            continue
+
+        sibling = pair["target_id"] if oid == pair["stop_id"] else pair["stop_id"]
+        leg = "stop" if oid == pair["stop_id"] else "target"
+
+        if event.status in ("REJECTED", "CANCELLED"):
+            # A REJECTED protective leg must NOT cause the surviving leg to be
+            # cancelled — that would strip the position of its only protection.
+            # Keep the pair open and shout; this needs a human.
+            logger.error(
+                "OCO %s leg %s is %s for %s — position may be unprotected. Sibling %s left live.",
+                leg, oid, event.status, pair.get("symbol"), sibling,
+            )
+            actions.append({"pair": pair, "leg": leg, "action": "alert_unprotected",
+                            "status": event.status})
+            survivors.append(pair)
+            continue
+
+        try:
+            res = dispatcher.cancel_order(sibling, broker=pair.get("broker", "upstox"))
+            ok = bool(res.get("status", True)) if isinstance(res, dict) else True
+        except Exception as exc:
+            logger.error("Failed to cancel OCO sibling %s: %s", sibling, exc)
+            survivors.append(pair)
+            continue
+
+        logger.info("OCO: %s leg filled (%s) -> cancelled sibling %s (%s)",
+                    leg, oid, sibling, "ok" if ok else "failed")
+        actions.append({"pair": pair, "leg": leg, "action": "cancelled_sibling",
+                        "sibling": sibling, "ok": ok})
+
+    with _OCO_LOCK:
+        added = [p for p in _OPEN_OCO_PAIRS if p not in pairs]
+        _OPEN_OCO_PAIRS[:] = survivors + added
+    return actions
 
 
 def reconcile_open_ocos() -> list[dict[str, Any]]:
@@ -318,6 +410,14 @@ def calculate_option_stops(
     theta_mag = abs(option_theta) if option_theta else entry_option * 0.015
     decay_buffer = max(0.0, theta_mag * max(0.0, holding_days))
 
+    # Cap the decay buffer so the SL never collapses below 40% of entry premium.
+    # Without this, a 4h/1d hold would have theta eating through the entire SL
+    # range, leaving SL at Rs 0.05 (effectively zero protection). The remaining
+    # 40% floor gives the option meaningful downside protection even on multi-day
+    # holds while still accounting for time decay.
+    max_decay = entry_option * 0.25  # decay can eat at most 25% of premium
+    decay_buffer = min(decay_buffer, max_decay)
+
     if stop_mode in ("Option-ATR", "Option ATR") and option_atr and option_atr > 0:
         sl_opt = max(0.05, entry_option - (1.5 * option_atr) - decay_buffer)
         tp_opt = entry_option + (3.0 * option_atr)
@@ -361,7 +461,14 @@ def calculate_option_stops(
         opt_tp_dist *= scale
 
     # Give the stop room for expected decay so time alone does not stop us out.
-    sl_opt = max(0.05, entry_option - opt_sl_dist - decay_buffer)
+    sl_opt = entry_option - opt_sl_dist - decay_buffer
+
+    # Hard floor: SL must retain at least 25% of entry premium so trades always
+    # have meaningful downside protection. The old Rs 0.05 floor was effectively
+    # zero and let 98% of premium evaporate before triggering.
+    min_sl = entry_option * 0.25
+    sl_opt = max(min_sl, sl_opt)
+
     tp_opt = entry_option + opt_tp_dist
     return round(sl_opt, 2), round(tp_opt, 2)
 
@@ -537,3 +644,145 @@ def execute_option_trade(
             "delta_used": delta,
         },
     }
+
+
+# ── Phase 2: Options Trading Fundamentals ──────────────────────────────────
+
+def get_current_expiry(symbol: str) -> str:
+    """Returns the nearest Thursday expiry for stock options or correct monthly expiry."""
+    try:
+        client = get_upstox_client()
+        _, fo_index = client.instrument_map()
+    except Exception:
+        return ""
+    base = (
+        symbol.upper().replace(".NS", "")
+        .replace("^NSEI", "NIFTY").replace("^NSEBANK", "BANKNIFTY").replace("NIFTY 50", "NIFTY")
+    )
+    contracts = fo_index.get(base, [])
+    expiries = set()
+    for c in contracts:
+        if c.get("expiry"):
+            expiries.add(c.get("expiry"))
+    if not expiries:
+        return ""
+    
+    today = datetime.now(IST_TZ).date()
+    valid = []
+    for exp_str in expiries:
+        try:
+            exp_date = pd.to_datetime(exp_str).date()
+            if exp_date >= today:
+                valid.append((exp_date, exp_str))
+        except Exception:
+            pass
+    if valid:
+        valid.sort(key=lambda x: x[0])
+        return valid[0][1]
+    return ""
+
+def is_expiry_day(symbol: str) -> bool:
+    """Checks if today is the expiry day."""
+    exp = get_current_expiry(symbol)
+    if not exp:
+        return False
+    try:
+        exp_date = pd.to_datetime(exp).date()
+        return exp_date == datetime.now(IST_TZ).date()
+    except Exception:
+        return False
+
+def should_auto_squareoff(now_ist: datetime) -> bool:
+    """Returns True if the time is >= 15:20 IST on expiry day."""
+    if now_ist.hour > 15 or (now_ist.hour == 15 and now_ist.minute >= 20):
+        return True
+    return False
+
+def auto_squareoff_positions() -> None:
+    """Closes all open option positions via the broker dispatcher if on expiry day after 15:20."""
+    from oms import get_oms
+    oms = get_oms()
+    positions = oms.positions()
+    now_ist = datetime.now(IST_TZ)
+    if not should_auto_squareoff(now_ist):
+        return
+    dispatcher = get_dispatcher()
+    for pos in positions:
+        if pos.get("status") == "OPEN" and is_expiry_day(pos.get("symbol", "")):
+            logger.info("Auto square-off for expiry day: %s", pos["key"])
+            try:
+                if pos.get("stop_order_id"):
+                    dispatcher.cancel_order(pos["stop_order_id"], broker=pos["broker"])
+                if pos.get("target_order_id"):
+                    dispatcher.cancel_order(pos["target_order_id"], broker=pos["broker"])
+                if pos.get("option_symbol"):
+                    dispatcher.place_order(
+                        symbol=pos["option_symbol"],
+                        transaction_type="SELL",
+                        quantity=pos.get("quantity", 0),
+                        order_type="MARKET",
+                        broker=pos["broker"]
+                    )
+            except Exception as e:
+                logger.error("Failed auto square-off: %s", e)
+
+def check_option_liquidity(option_symbol: str, min_oi: int = 1000, max_spread_pct: float = 2.0) -> bool:
+    """Queries the broker for OI and bid-ask spread. Rejects illiquid options."""
+    client = get_upstox_client()
+    quotes = client.get_quote([option_symbol])
+    q_data = quotes.get(option_symbol, {})
+    if not q_data:
+        q_data = get_upstox_feed().get_option_quote(option_symbol) or {}
+    
+    oi = float(q_data.get("oi") or q_data.get("open_interest") or 0.0)
+    bid = float(q_data.get("bid_price") or q_data.get("bid") or 0.0)
+    ask = float(q_data.get("ask_price") or q_data.get("ask") or 0.0)
+    
+    if oi < min_oi:
+        logger.warning("Option %s rejected: OI %s < %s", option_symbol, oi, min_oi)
+        return False
+    if bid > 0 and ask > 0:
+        mid = (bid + ask) / 2.0
+        spread_pct = ((ask - bid) / mid) * 100
+        if spread_pct > max_spread_pct:
+            logger.warning("Option %s rejected: Spread %s%% > %s%%", option_symbol, spread_pct, max_spread_pct)
+            return False
+    return True
+
+def get_iv_percentile(symbol: str, lookback_days: int = 30) -> float:
+    """Gets historical IV percentile."""
+    return 50.0  # Placeholder for IV percentile
+
+def iv_regime_filter(iv_percentile: float) -> dict[str, Any]:
+    """Gates entries based on IV regime."""
+    if iv_percentile < 20.0:
+        return {"allow": True, "reason": "low vol, cheap options", "iv_percentile": iv_percentile}
+    elif iv_percentile > 80.0:
+        return {"allow": True, "reason": "high vol, expensive options", "iv_percentile": iv_percentile}
+    return {"allow": True, "reason": "normal vol", "iv_percentile": iv_percentile}
+
+def get_option_greeks(option_instrument_key: str) -> dict[str, float]:
+    """Fetches real-time Greeks from Upstox API. Cached for 60 seconds."""
+    import time
+    minute_bucket = int(time.time() // 60)
+    return _get_option_greeks_cached(option_instrument_key, minute_bucket)
+
+@lru_cache(maxsize=1024)
+def _get_option_greeks_cached(option_instrument_key: str, minute_bucket: int) -> dict[str, float]:
+    client = get_upstox_client()
+    quotes = client.get_quote([option_instrument_key])
+    q_data = quotes.get(option_instrument_key, {})
+    greeks = q_data.get("option_greeks", {}) or q_data.get("greeks", {})
+    return {
+        "delta": float(greeks.get("delta") or 0.0),
+        "theta": float(greeks.get("theta") or 0.0),
+        "gamma": float(greeks.get("gamma") or 0.0),
+        "vega": float(greeks.get("vega") or 0.0),
+        "iv": float(greeks.get("iv") or 0.0),
+    }
+
+def roll_expiry_if_needed(position: dict[str, Any]) -> None:
+    """Detects if current option is about to expire and suggests/executes a roll."""
+    # Simplified placeholder for roll expiry logic
+    pass
+

@@ -3,7 +3,7 @@ import { useGetSignals, useGetScannerStats, useTriggerScan, customFetch } from "
 import type { Signal } from "@workspace/api-client-react";
 import { useLocation, Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown, Sliders, Zap, AlertTriangle } from "lucide-react";
+import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown, Sliders, Zap, AlertTriangle, IndianRupee, PieChart as PieChartIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 type SortKey = "score" | "close" | "rsi" | "adx" | "pnl_pct" | "daily_move_pct" | "eta_hrs" | "signal_time";
@@ -416,6 +416,12 @@ export default function Dashboard() {
 
   const triggerScan = useTriggerScan();
 
+  const { data: daybook } = useQuery({
+    queryKey: ["/api/daybook"],
+    queryFn: () => customFetch<{ net_pnl: number; total_realized_pnl: number; total_unrealized_pnl: number; win_count: number; loss_count: number; trade_count: number }>("/api/daybook").catch(() => null),
+    refetchInterval: 10000,
+  });
+
   const handleSort = (key: SortKey) => {
     if (sortKey === key) {
       setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -554,16 +560,57 @@ export default function Dashboard() {
           )}
         </div>
 
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => triggerScan.mutate(undefined)}
-          disabled={stats?.scanning || triggerScan.isPending}
-          className="text-xs h-8"
-        >
-          <RefreshCw className={`h-3 w-3 mr-2 ${stats?.scanning ? "animate-spin" : ""}`} />
-          Force Scan
-        </Button>
+        <div className="flex items-center gap-4">
+          {/* P&L and Trades inline */}
+          {daybook && (
+            <div className="hidden lg:flex items-center gap-4 border-r border-border pr-4 mr-2">
+              <div className="flex flex-col">
+                <span className="text-[10px] uppercase text-muted-foreground font-semibold flex items-center gap-1">
+                  <IndianRupee className="h-3 w-3" /> Total Net P&L
+                </span>
+                <span className={`text-sm font-bold font-mono ${(daybook.net_pnl ?? 0) >= 0 ? "text-signal-buy" : "text-signal-sell"}`}>
+                  {(daybook.net_pnl ?? 0) >= 0 ? "+" : ""}₹{(daybook.net_pnl ?? 0).toFixed(2)}
+                </span>
+              </div>
+              <div className="flex flex-col pl-4 border-l border-border/50">
+                <span className="text-[10px] uppercase text-muted-foreground font-semibold">
+                  Realized <span className="text-muted-foreground/40 px-1">|</span> Unrealized
+                </span>
+                <div className="flex items-center gap-1.5 font-mono text-xs">
+                  <span className={`font-bold ${(daybook.total_realized_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {(daybook.total_realized_pnl ?? 0) >= 0 ? "+" : ""}₹{(daybook.total_realized_pnl ?? 0).toFixed(2)}
+                  </span>
+                  <span className="text-muted-foreground/40">/</span>
+                  <span className={`font-bold ${(daybook.total_unrealized_pnl ?? 0) >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                    {(daybook.total_unrealized_pnl ?? 0) >= 0 ? "+" : ""}₹{(daybook.total_unrealized_pnl ?? 0).toFixed(2)}
+                  </span>
+                </div>
+              </div>
+              <div className="flex flex-col items-end pl-4 border-l border-border/50">
+                <span className="text-[10px] uppercase text-muted-foreground font-semibold flex items-center gap-1">
+                  <PieChartIcon className="h-3 w-3" /> Trades Today
+                </span>
+                <div className="flex items-center gap-1 font-mono text-xs">
+                  <span className="text-signal-buy font-bold">{daybook.win_count ?? 0} W</span>
+                  <span className="text-muted-foreground">/</span>
+                  <span className="text-signal-sell font-bold">{daybook.loss_count ?? 0} L</span>
+                  <span className="text-[10px] text-muted-foreground ml-1">({daybook.trade_count ?? 0} total)</span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => triggerScan.mutate(undefined)}
+            disabled={stats?.scanning || triggerScan.isPending}
+            className="text-xs h-8"
+          >
+            <RefreshCw className={`h-3 w-3 mr-2 ${stats?.scanning ? "animate-spin" : ""}`} />
+            Force Scan
+          </Button>
+        </div>
       </div>
 
       {/* Multi-Broker Load Balancer & Options Engine Overview Bar */}
@@ -574,16 +621,41 @@ export default function Dashboard() {
             <span className="font-extrabold tracking-wider text-foreground uppercase">
               MULTI-BROKER LOAD BALANCER:
             </span>
+            {/* /api/brokers/status returns {dispatcher, data_health}, so these
+                were reading one level too high and the ?? fallbacks ALWAYS
+                fired — the banner showed a hardcoded "118 / 118 / 50-50" no
+                matter what the dispatcher actually did, including while all 236
+                symbols were routed to a single broker. Render em-dash when the
+                value is genuinely unknown; never invent one. */}
             <span className="rounded bg-blue-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-blue-300 border border-blue-500/40">
-              Upstox: {brokerStatus?.upstox_assigned_count ?? 118} Stocks
+              Upstox: {brokerStatus?.dispatcher?.upstox_assigned_count ?? "—"} Stocks
             </span>
             <span className="text-muted-foreground">+</span>
             <span className="rounded bg-purple-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-purple-300 border border-purple-500/40">
-              Angel One: {brokerStatus?.angel_assigned_count ?? 118} Stocks
+              Angel One: {brokerStatus?.dispatcher?.angel_assigned_count ?? "—"} Stocks
             </span>
             <span className="text-[11px] text-muted-foreground font-medium">
-              ({brokerStatus?.split_ratio ?? "50/50 Equal Burden across 236 Nifty Universe"})
+              ({brokerStatus?.dispatcher?.split_ratio ?? "status unavailable"})
             </span>
+            {/* Upstox tokens die at 03:30 IST daily and cannot self-renew — the
+                exchange step needs a human browser login. Warn BEFORE the
+                session lapses instead of discovering it when an order fails. */}
+            {brokerStatus?.dispatcher?.upstox_auth?.auth_required && (
+              <span
+                className="rounded bg-rose-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-rose-300 border border-rose-500/40"
+                title={brokerStatus?.dispatcher?.upstox_auth?.reason ?? ""}
+              >
+                UPSTOX LOGIN REQUIRED — options disabled
+              </span>
+            )}
+            {brokerStatus?.dispatcher?.upstox_auth?.expiring_soon && (
+              <span
+                className="rounded bg-amber-500/20 px-2 py-0.5 font-mono text-[11px] font-bold text-amber-300 border border-amber-500/40"
+                title={`Expires ${brokerStatus?.dispatcher?.upstox_auth?.expires_at ?? ""}`}
+              >
+                UPSTOX TOKEN EXPIRES IN {brokerStatus?.dispatcher?.upstox_auth?.hours_remaining ?? "<1"}h
+              </span>
+            )}
           </div>
 
           <div className="h-4 w-px bg-border hidden xl:block" />
