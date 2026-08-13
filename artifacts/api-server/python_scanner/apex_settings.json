@@ -46,7 +46,7 @@
     "slippage_pct": 0.1,
     "max_open_positions": 5,
     "max_per_sector": 2,
-    "trade_style": "all",
+    "trade_style": "intraday_btst",
     "enable_options": true,
     "strike_mode": "Always ATM",
     "trade_options_intraday": true,

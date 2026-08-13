@@ -1846,12 +1846,16 @@ def _stop_fill(trade: ActiveTrade, row: pd.Series, config: ApexConfig) -> Option
                 return active_stop, active_reason
                 
         # DUAL TRACKING: Exit if option premium hits SL/TSL
+        # CRITICAL: Return the SPOT close price, not the option premium.
+        # The option premium (e.g. ₹5.50) is in a different price space
+        # from the underlying (e.g. ₹25000). Returning the premium would
+        # corrupt P&L as (5.50 - 25000) / 25000 = -99.9%.
         if not np.isnan(trade.option_ltp) and trade.option_ltp > 0:
             opt_trail_active = config.use_trail and trade.option_tsl > trade.option_sl1
             opt_active_stop = max(trade.option_sl1, trade.option_tsl) if opt_trail_active else trade.option_sl1
             opt_active_reason = "Option TSL" if opt_trail_active else "Option Hard SL1"
             if trade.option_ltp <= opt_active_stop:
-                return trade.option_ltp, opt_active_reason
+                return float(row["close"]), opt_active_reason
 
         return None
 
@@ -1870,12 +1874,13 @@ def _stop_fill(trade: ActiveTrade, row: pd.Series, config: ApexConfig) -> Option
         return trade.tsl, active_reason
         
     # DUAL TRACKING: Exit if option premium hits SL/TSL
+    # CRITICAL: Return SPOT close, not option premium (see realistic_fills path).
     if not np.isnan(trade.option_ltp) and trade.option_ltp > 0:
         opt_trail_active = config.use_trail and trade.option_tsl > trade.option_sl1
         opt_active_stop = max(trade.option_sl1, trade.option_tsl) if opt_trail_active else trade.option_sl1
         opt_active_reason = "Option TSL" if opt_trail_active else "Option Hard SL1"
         if trade.option_ltp <= opt_active_stop:
-            return trade.option_ltp, opt_active_reason
+            return float(row["close"]), opt_active_reason
             
     return None
 
