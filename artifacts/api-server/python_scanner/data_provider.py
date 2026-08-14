@@ -701,6 +701,11 @@ def complete_daily_from_intraday(symbol: str, daily: Optional[pd.DataFrame]) -> 
 
     merged = pd.concat([daily, missing[_OHLCV_COLS]])
     merged = merged[~merged.index.duplicated(keep="last")].sort_index()
+    # pd.concat can silently downgrade a tz-aware DatetimeIndex to a plain
+    # Index when the two frames have subtly different tz representations.
+    # Restore it so downstream normalize_ohlcv doesn't reject the frame.
+    if not isinstance(merged.index, pd.DatetimeIndex):
+        merged.index = pd.to_datetime(merged.index, utc=True).tz_convert(_IST_TZ)
     logger.info(
         "Rebuilt %d daily bar(s) for %s from the intraday store (Yahoo had not "
         "published a usable close): %s",

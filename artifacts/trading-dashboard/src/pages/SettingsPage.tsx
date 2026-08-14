@@ -83,6 +83,7 @@ async function fetchSettings(): Promise<Settings> {
 async function saveSettings(body: Settings): Promise<{ settings: Settings }> {
   return customFetch("/api/settings", {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 }
@@ -167,6 +168,9 @@ export default function SettingsPage() {
       qc.invalidateQueries({ queryKey: ["/api/signals"] });
       setSavedTick(true);
       setTimeout(() => setSavedTick(false), 2500);
+    },
+    onError: (err) => {
+      console.error("[SettingsPage] Save failed:", err);
     },
   });
 
