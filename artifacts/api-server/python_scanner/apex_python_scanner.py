@@ -2141,19 +2141,8 @@ class ApexScanner:
                     if float(row["low"]) <= active.tp3:
                         active.t3_hit = True
                 # DUAL TRACKING: Update live option premium on the forming bar
+                # (live_option_ltp is pre-fetched by scanner_engine before dispatching workers)
                 if i == len(df) - 1 and last_bar_is_forming:
-                    if np.isnan(live_option_ltp) and active.option_symbol:
-                        try:
-                            from broker_upstox import get_upstox_client
-                            import asyncio
-                            # We can just use the synchronous get_quote
-                            upstox = get_upstox_client()
-                            quotes = upstox.get_quote([active.option_symbol])
-                            if quotes and active.option_symbol in quotes:
-                                live_option_ltp = float(quotes[active.option_symbol].get("last_price", math.nan))
-                        except Exception as e:
-                            pass
-                            
                     active.option_ltp = live_option_ltp
                     if not np.isnan(live_option_ltp) and live_option_ltp > 0:
                         if np.isnan(active.peak_option_price):
@@ -2582,8 +2571,9 @@ class ApexScanner:
             opt_symbol_label = f"{ticker} {s_str} {opt_type}"
             c_price = float(row.get("close", math.nan))
 
-            # Try to fetch real option data from Upstox API for accurate
-            # premium, Greeks, and instrument key.
+            # Try to resolve the real option contract from the instrument master
+            # (no live API call — synthetic pricing is used until the next scan
+            # cycle picks up the real LTP via the pre-scan batch fetch).
             real_premium = math.nan
             real_delta = math.nan
             real_theta = math.nan
@@ -2595,24 +2585,6 @@ class ApexScanner:
                 contract = resolve_atm_option(symbol, c_price, direction)
                 if contract:
                     real_inst_key = contract.get("instrument_key", "")
-                    from broker_upstox import get_upstox_client
-                    client = get_upstox_client()
-                    if real_inst_key:
-                        quotes = client.get_quote([real_inst_key])
-                        q_data = quotes.get(real_inst_key, {})
-                        ltp = float(q_data.get("last_price") or q_data.get("ltp") or 0.0)
-                        greeks = q_data.get("option_greeks", {}) or q_data.get("greeks", {})
-                        if ltp > 0:
-                            real_premium = ltp
-                        g_delta = greeks.get("delta")
-                        g_theta = greeks.get("theta")
-                        g_gamma = greeks.get("gamma")
-                        if g_delta is not None:
-                            real_delta = abs(float(g_delta))
-                        if g_theta is not None:
-                            real_theta = abs(float(g_theta))
-                        if g_gamma is not None:
-                            real_gamma = float(g_gamma)
             except Exception:
                 pass
 

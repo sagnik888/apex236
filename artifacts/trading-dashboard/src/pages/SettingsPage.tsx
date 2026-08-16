@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Save, RotateCcw, Loader2, Check, AlertTriangle } from "lucide-react";
 import { customFetch } from "@workspace/api-client-react";
@@ -110,7 +110,7 @@ function NumberField({
       <div className="flex items-center gap-1.5">
         <input
           type="number" value={value} step={step} min={min} max={max} disabled={disabled}
-          onChange={(e) => onChange(parseFloat(e.target.value))}
+          onChange={(e) => { const parsed = parseFloat(e.target.value); if (!isNaN(parsed)) onChange(parsed); }}
           className="w-24 rounded border border-border bg-background px-2 py-1.5 font-mono text-sm text-foreground focus:border-primary focus:outline-none disabled:cursor-not-allowed"
         />
         {suffix && <span className="text-xs text-muted-foreground">{suffix}</span>}
@@ -157,12 +157,15 @@ export default function SettingsPage() {
   const { data, isLoading } = useQuery({ queryKey: ["/api/settings"], queryFn: fetchSettings });
   const [form, setForm] = useState<Settings>(DEFAULTS);
   const [savedTick, setSavedTick] = useState(false);
+  const dirtyRef = useRef(false);
 
-  useEffect(() => { if (data) setForm(data); }, [data]);
+  // Only sync server data into the form when not dirty (initial load or after save)
+  useEffect(() => { if (data && !dirtyRef.current) setForm(data); }, [data]);
 
   const mutation = useMutation({
     mutationFn: saveSettings,
     onSuccess: (res) => {
+      dirtyRef.current = false;
       setForm(res.settings);
       qc.invalidateQueries({ queryKey: ["/api/settings"] });
       qc.invalidateQueries({ queryKey: ["/api/signals"] });
@@ -174,7 +177,7 @@ export default function SettingsPage() {
     },
   });
 
-  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => setForm((f) => ({ ...f, [k]: v }));
+  const set = <K extends keyof Settings>(k: K, v: Settings[K]) => { dirtyRef.current = true; setForm((f) => ({ ...f, [k]: v })); };
   const toggleTf = (tf: string) => {
     const has = form.enabled_timeframes.includes(tf);
     const next = has ? form.enabled_timeframes.filter((t) => t !== tf) : [...form.enabled_timeframes, tf];
@@ -195,7 +198,7 @@ export default function SettingsPage() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setForm(DEFAULTS)}
+              onClick={() => { dirtyRef.current = true; setForm(DEFAULTS); }}
               className="flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-xs text-muted-foreground hover:text-foreground"
             >
               <RotateCcw className="h-3.5 w-3.5" /> Reset
@@ -264,7 +267,7 @@ export default function SettingsPage() {
               <NumberField label="Min confluence score" value={form.min_score} onChange={(v) => set("min_score", v)} step={1} min={0} max={100} />
               <NumberField label="Min bull-bear divergence" value={form.conflict_margin} onChange={(v) => set("conflict_margin", v)} step={1} min={0} max={100} suffix="pts" />
               <NumberField label="Min ADX" value={form.min_adx} onChange={(v) => set("min_adx", v)} step={1} min={0} max={100} />
-              <NumberField label="Bars between signals" value={form.signal_cooldown} onChange={(v) => set("signal_cooldown", Math.round(v))} step={1} min={0} max={100} />
+              <NumberField label="Bars between signals" value={form.signal_cooldown} onChange={(v) => set("signal_cooldown", Math.round(v))} step={1} min={0} max={50} />
             </div>
             <div className="mt-4"><Toggle checked={form.use_htf} onChange={(v) => set("use_htf", v)} label="Require 15m EMA alignment (HTF gate)" /></div>
           </Card>
@@ -281,7 +284,7 @@ export default function SettingsPage() {
               />
               <div className="flex flex-wrap gap-6">
                 <NumberField label="Fixed SL %" value={form.fixed_sl_pct} onChange={(v) => set("fixed_sl_pct", v)} step={0.1} min={0.1} max={10} suffix="%" disabled={form.sl_mode !== "fixed"} />
-                <NumberField label="ATR multiplier" value={form.atr_mult} onChange={(v) => set("atr_mult", v)} step={0.1} min={0.3} max={5} suffix="× ATR" />
+                <NumberField label="ATR multiplier" value={form.atr_mult} onChange={(v) => set("atr_mult", v)} step={0.1} min={0.5} max={10} suffix="× ATR" />
               </div>
             </div>
           </Card>
@@ -299,9 +302,9 @@ export default function SettingsPage() {
               />
               {form.target_mode === "rr" ? (
                 <div className="flex flex-wrap gap-6">
-                  <NumberField label="T1 (R)" value={form.t1_r} onChange={(v) => set("t1_r", v)} step={0.1} min={0.2} max={10} suffix="R" />
-                  <NumberField label="T2 (R)" value={form.t2_r} onChange={(v) => set("t2_r", v)} step={0.1} min={0.2} max={15} suffix="R" />
-                  <NumberField label="T3 (R)" value={form.t3_r} onChange={(v) => set("t3_r", v)} step={0.1} min={0.2} max={20} suffix="R" />
+                  <NumberField label="T1 (R)" value={form.t1_r} onChange={(v) => set("t1_r", v)} step={0.1} min={0.5} max={20} suffix="R" />
+                  <NumberField label="T2 (R)" value={form.t2_r} onChange={(v) => set("t2_r", v)} step={0.1} min={0.5} max={30} suffix="R" />
+                  <NumberField label="T3 (R)" value={form.t3_r} onChange={(v) => set("t3_r", v)} step={0.1} min={0.5} max={50} suffix="R" />
                 </div>
               ) : (
                 <div className="rounded-md border border-primary/30 bg-primary/5 p-3">
@@ -332,13 +335,13 @@ export default function SettingsPage() {
               />
               <Toggle checked={form.lock_at_t1} onChange={(v) => set("lock_at_t1", v)} label="Lock profit at T1" />
               <div className="flex flex-wrap gap-6">
-                <NumberField label="Activate trail at R:R" value={form.trail_start_r} onChange={(v) => set("trail_start_r", v)} step={0.1} min={0} max={20} suffix="R" disabled={!form.use_trail} />
-                <NumberField label="Trail ATR offset" value={form.trail_mult} onChange={(v) => set("trail_mult", v)} step={0.1} min={0.1} max={20} suffix="× ATR" disabled={!form.use_trail} />
+                <NumberField label="Activate trail at R:R" value={form.trail_start_r} onChange={(v) => set("trail_start_r", v)} step={0.1} min={0.5} max={20} suffix="R" disabled={!form.use_trail} />
+                <NumberField label="Trail ATR offset" value={form.trail_mult} onChange={(v) => set("trail_mult", v)} step={0.1} min={0.5} max={10} suffix="× ATR" disabled={!form.use_trail} />
               </div>
               <div className="flex flex-wrap gap-6">
-                <NumberField label="Momentum exit confirmation" value={form.exit_confirmation_bars} onChange={(v) => set("exit_confirmation_bars", Math.round(v))} step={1} min={1} max={20} suffix="bars" />
+                <NumberField label="Momentum exit confirmation" value={form.exit_confirmation_bars} onChange={(v) => set("exit_confirmation_bars", Math.round(v))} step={1} min={1} max={10} suffix="bars" />
                 <NumberField label="Circuit breaker losses" value={form.max_consecutive_losses} onChange={(v) => set("max_consecutive_losses", Math.round(v))} step={1} min={1} max={20} />
-                <NumberField label="Circuit breaker pause" value={form.circuit_pause_bars} onChange={(v) => set("circuit_pause_bars", Math.round(v))} step={1} min={0} max={500} suffix="bars" />
+                <NumberField label="Circuit breaker pause" value={form.circuit_pause_bars} onChange={(v) => set("circuit_pause_bars", Math.round(v))} step={1} min={1} max={50} suffix="bars" />
               </div>
             </div>
           </Card>

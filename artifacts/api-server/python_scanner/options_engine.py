@@ -233,6 +233,10 @@ def _listed_strikes(underlying: str) -> tuple[float, ...]:
         underlying.upper().replace(".NS", "")
         .replace("^NSEI", "NIFTY").replace("^NSEBANK", "BANKNIFTY").replace("NIFTY 50", "NIFTY")
     )
+    # Alias mapping for symbols whose scanner universe name differs from
+    # the NSE F&O underlying ticker used in Upstox instrument master.
+    _FO_ALIASES = {"LTM": "LTIM", "PIRAMALFIN": "PEL", "ETERNAL": "ZOMATO"}
+    base = _FO_ALIASES.get(base, base)
     contracts = fo_index.get(base, [])
     strikes = {
         float(c.get("strike_price") or 0.0)

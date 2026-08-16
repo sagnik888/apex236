@@ -454,7 +454,7 @@ async def update_settings_endpoint(request: Request):
         if not isinstance(body, dict):
             raise ValueError("Body must be a JSON object")
         loop = asyncio.get_running_loop()
-        merged = await loop.run_in_executor(scanner_pool, update_settings, body)
+        merged = await loop.run_in_executor(None, update_settings, body)
     except Exception as exc:
         return JSONResponse(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, content={"detail": str(exc)})
     # Refresh results with the new parameters without waiting for the cycle.

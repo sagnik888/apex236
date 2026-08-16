@@ -365,6 +365,10 @@ class UpstoxClient:
         """Lookup an active option contract (`NSE_FO`) by strike and type for the given underlying."""
         _, fo_index = self.instrument_map()
         base = underlying_symbol.replace(".NS", "").replace("^NSEI", "NIFTY").replace("^NSEBANK", "BANKNIFTY").replace("NIFTY 50", "NIFTY").upper()
+        # Alias mapping for symbols whose scanner universe name differs from
+        # the NSE F&O underlying ticker used in Upstox instrument master.
+        _FO_ALIASES = {"LTM": "LTIM", "PIRAMALFIN": "PEL", "ETERNAL": "ZOMATO"}
+        base = _FO_ALIASES.get(base, base)
         contracts = fo_index.get(base, [])
         if not contracts:
             return None
@@ -470,7 +474,10 @@ class UpstoxClient:
         return None
 
     def get_quote(self, instrument_keys: list[str]) -> dict[str, dict]:
-        """Fetch batched market quote (`/v2/market-quote/quotes`) including option greeks (`delta`, `iv`)."""
+        """Fetch batched market quote (`/v2/market-quote/quotes`) including option greeks (`delta`, `iv`).
+
+        Retries once on failure with 401 token invalidation (matching get_candles pattern).
+        """
         if not instrument_keys:
             return {}
         self.ensure_session()
@@ -481,14 +488,25 @@ class UpstoxClient:
         for i in range(0, len(instrument_keys), chunk_size):
             chunk = instrument_keys[i:i + chunk_size]
             url = f"{BASE_URL}/market-quote/quotes"
-            try:
-                r = self._http.get(url, headers=self._headers(), params={"symbol": ",".join(chunk)}, timeout=15)
-                if r.ok:
-                    body = r.json()
-                    if body.get("status") == "success" and body.get("data"):
-                        results.update(body["data"])
-            except Exception as exc:
-                logger.debug("Upstox quote batch failed: %s", exc)
+            for attempt in range(2):  # 1 retry
+                try:
+                    r = self._http.get(url, headers=self._headers(), params={"symbol": ",".join(chunk)}, timeout=8)
+                    if r.status_code == 401 and attempt == 0:
+                        logger.info("Upstox quote got 401 — invalidating session and retrying")
+                        self._invalidate_session()
+                        self.ensure_session()
+                        self._quote_gate.wait()
+                        continue
+                    if r.ok:
+                        body = r.json()
+                        if body.get("status") == "success" and body.get("data"):
+                            results.update(body["data"])
+                    break  # success or non-retryable error
+                except Exception as exc:
+                    if attempt == 0:
+                        logger.debug("Upstox quote batch failed (attempt 1): %s — retrying", exc)
+                        continue
+                    logger.debug("Upstox quote batch failed (attempt 2): %s", exc)
         return results
 
     # ── Order Execution Service (OMS) ─────────────────────────────────────────
