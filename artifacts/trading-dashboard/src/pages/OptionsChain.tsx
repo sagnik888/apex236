@@ -25,19 +25,46 @@ export default function OptionsChain() {
 
   const { data: symbolsData } = useQuery({
     queryKey: ["/api/symbols"],
-    queryFn: () => customFetch<string[]>("/api/symbols"),
+    queryFn: () => customFetch<{ symbols: string[] }>("/api/symbols"),
     staleTime: 60000,
   });
 
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ["/api/options/chain", symbol, expiry],
-    queryFn: () => customFetch<{ expiries: string[]; chain: OptionRow[]; spot_price: number }>(`/api/options/chain?symbol=${symbol}${expiry ? `&expiry=${expiry}` : ""}`),
+    queryFn: () => customFetch<{ expiries: string[]; chain: any[]; spot_price: number }>(`/api/options/chain?symbol=${symbol}${expiry ? `&expiry=${expiry}` : ""}`),
     refetchInterval: 10000,
     retry: false
   });
 
-  const symbols = symbolsData || ["NIFTY", "BANKNIFTY", "FINNIFTY", "RELIANCE", "HDFCBANK"];
-  const chain = data?.chain || [];
+  const symbols = symbolsData?.symbols || ["NIFTY", "BANKNIFTY", "FINNIFTY", "RELIANCE", "HDFCBANK"];
+  
+  const transformChain = (flatChain: any[]): OptionRow[] => {
+    if (!flatChain || !Array.isArray(flatChain)) return [];
+    const strikeMap = new Map<number, OptionRow>();
+    flatChain.forEach(contract => {
+      const strike = contract.strike;
+      if (!strikeMap.has(strike)) {
+        strikeMap.set(strike, { strike, is_atm: contract.is_atm });
+      }
+      const row = strikeMap.get(strike)!;
+      if (contract.type === 'CE') {
+        row.ce_oi = contract.oi;
+        row.ce_iv = contract.iv;
+        row.ce_ltp = contract.ltp;
+        row.ce_delta = contract.delta;
+        row.ce_theta = contract.theta;
+      } else if (contract.type === 'PE') {
+        row.pe_oi = contract.oi;
+        row.pe_iv = contract.iv;
+        row.pe_ltp = contract.ltp;
+        row.pe_delta = contract.delta;
+        row.pe_theta = contract.theta;
+      }
+    });
+    return Array.from(strikeMap.values()).sort((a, b) => a.strike - b.strike);
+  };
+
+  const chain = transformChain(data?.chain || []);
   const spotPrice = data?.spot_price;
   const expiries = data?.expiries || [];
 

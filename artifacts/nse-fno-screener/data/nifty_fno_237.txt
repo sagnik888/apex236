@@ -1,0 +1,238 @@
+#	Symbol	Company Name	Lot Size	Note
+1	360ONE	360 One WAM	500	
+2	AARTIIND	Aarti Industries	850	
+3	ABB	ABB India	125	
+4	ABBOTINDIA	Abbott India	40	
+5	ABCAPITAL	Aditya Birla Capital	3100	
+6	ACC	ACC Ltd	250	
+7	ADANIENT	Adani Enterprises	309	
+8	ADANIENSOL	Adani Energy Solutions	675	
+9	ADANIGREEN	Adani Green Energy	600	
+10	ADANIPORTS	Adani Ports & SEZ	475	
+11	ADANIPOWER	Adani Power	3550	
+12	ALKEM	Alkem Laboratories	125	
+13	AMBER	Amber Enterprises India	100	
+14	AMBUJACEM	Ambuja Cements	1050	
+15	ANGELONE	Angel One	2500	
+16	APLAPOLLO	APL Apollo Tubes	350	
+17	APOLLOHOSP	Apollo Hospitals	125	
+18	ASHOKLEY	Ashok Leyland	5000	
+19	ASIANPAINT	Asian Paints	250	
+20	ASTRAL	Astral Ltd	425	
+21	ATUL	Atul Ltd	75	
+22	AUBANK	AU Small Finance Bank	1000	
+23	AUROPHARMA	Aurobindo Pharma	550	
+24	AXISBANK	Axis Bank	625	
+25	BAJAJ-AUTO	Bajaj Auto	75	
+26	BAJAJFINSV	Bajaj Finserv	250	
+27	BAJAJHLDNG	Bajaj Holdings & Investments	50	
+28	BAJFINANCE	Bajaj Finance	750	
+29	BALKRISIND	Balkrishna Industries	300	
+30	BALRAMCHIN	Balrampur Chini Mills	1600	
+31	BANDHANBNK	Bandhan Bank	3600	
+32	BANKBARODA	Bank of Baroda	2925	
+33	BANKINDIA	Bank of India	5200	
+34	BATAINDIA	Bata India	275	
+35	BDL	Bharat Dynamics Ltd	350	
+36	BEL	Bharat Electronics	1425	
+37	BERGEPAINT	Berger Paints	1100	
+38	BHARATFORG	Bharat Forge	500	
+39	BHARTIARTL	Bharti Airtel	475	
+40	BHEL	BHEL	2625	
+41	BIOCON	Biocon	2500	
+42	BLUESTARCO	Blue Star	325	
+43	BOSCHLTD	Bosch Ltd	25	
+44	BPCL	BPCL	1975	
+45	BRITANNIA	Britannia Industries	125	
+46	BSE	BSE Ltd	375	
+47	CAMS	CAMS	750	
+48	CANBK	Canara Bank	6750	
+49	CANFINHOME	Can Fin Homes	975	
+50	CDSL	CDSL	475	
+51	CESC	CESC Ltd	2925	
+52	CGPOWER	CG Power & Industrial	850	
+53	CHAMBLFERT	Chambal Fertilizers	1500	
+54	CHOLAFIN	Cholamandalam Finance	625	
+55	CIPLA	Cipla	375	
+56	COALINDIA	Coal India	1350	
+57	COCHINSHIP	Cochin Shipyard	400	
+58	COFORGE	Coforge	375	
+59	COLPAL	Colgate Palmolive	225	
+60	CONCOR	Container Corp	1250	
+61	COROMANDEL	Coromandel International	700	
+62	CROMPTON	Crompton Greaves Consumer	1800	
+63	CUMMINSIND	Cummins India	200	
+64	DABUR	Dabur India	1250	
+65	DALBHARAT	Dalmia Bharat	325	
+66	DEEPAKNTR	Deepak Nitrite	250	
+67	DELHIVERY	Delhivery	2075	
+68	DIVISLAB	Divi’s Laboratories	100	
+69	DIXON	Dixon Technologies	50	
+70	DLF	DLF	825	
+71	DMART	Avenue Supermarts	150	
+72	DRREDDY	Dr. Reddy’s Laboratories	625	
+73	EICHERMOT	Eicher Motors	100	
+74	ETERNAL	Zomato (rebranded)	2425	
+75	EXIDEIND	Exide Industries	1800	
+76	FEDERALBNK	Federal Bank	5000	
+77	FORCEMOT	Force Motors	25	
+78	FORTIS	Fortis Healthcare	775	
+79	GAIL	GAIL India	3150	
+80	GLENMARK	Glenmark Pharmaceuticals	375	
+81	GMRAIRPORT	GMR Airports Infrastructure	6975	
+82	GODFRYPHLP	Godfrey Phillips India	275	
+83	GODREJCP	Godrej Consumer Products	500	
+84	GODREJPROP	Godrej Properties	275	
+85	GRANULES	Granules India	2000	
+86	GRASIM	Grasim Industries	250	
+87	HAL	Hindustan Aeronautics	150	
+88	HAVELLS	Havells India	500	
+89	HCLTECH	HCL Technologies	350	
+90	HDFCAMC	HDFC AMC	300	
+91	HDFCBANK	HDFC Bank	550	
+92	HDFCLIFE	HDFC Life Insurance	1100	
+93	HEROMOTOCO	Hero MotoCorp	150	
+94	HINDALCO	Hindalco Industries	700	
+95	HINDPETRO	HPCL	2025	
+96	HINDUNILVR	Hindustan Unilever	300	
+97	HINDZINC	Hindustan Zinc	1225	
+98	HUDCO	HUDCO	2775	
+99	HYUNDAI	Hyundai Motor India	275	
+100	ICICIBANK	ICICI Bank	700	
+101	ICICIGI	ICICI Lombard GIC	325	
+102	ICICIPRULI	ICICI Pru Life Insurance	925	
+103	IDEA	Vodafone Idea	71475	
+104	IDFCFIRSTB	IDFC First Bank	9275	
+105	IEX	Indian Energy Exchange	3750	
+106	IGL	Indraprastha Gas	1375	
+107	INDHOTEL	Indian Hotels Co	1000	
+108	INDIAMART	Indiamart Intermesh	150	
+109	INDIANB	Indian Bank	1000	
+110	INDIGO	InterGlobe Aviation	150	
+111	INDUSINDBK	IndusInd Bank	700	
+112	INDUSTOWER	Indus Towers	1700	
+113	INFY	Infosys	400	
+114	INOXWIND	Inox Wind	3575	
+115	IOC	Indian Oil Corporation	4875	
+116	IPCALAB	IPCA Laboratories	650	
+117	IRCTC	IRCTC	875	
+118	IREDA	IREDA	3450	
+119	IRFC	IRFC	4250	
+120	ITC	ITC Ltd	1600	
+121	JIOFIN	Jio Financial Services	2350	
+122	JINDALSTEL	Jindal Steel & Power	625	
+123	JSL	Jindal Stainless	775	
+124	JSWENERGY	JSW Energy	1000	
+125	JSWSTEEL	JSW Steel	675	
+126	JUBLFOOD	Jubilant Foodworks	1250	
+127	KALYANKJIL	Kalyan Jewellers India	1175	
+128	KAYNES	Kaynes Technology India	100	
+129	KEI	KEI Industries	175	
+130	KFINTECH	KFin Technologies	500	
+131	KOTAKBANK	Kotak Mahindra Bank	2000	
+132	KPITTECH	KPIT Technologies	425	
+133	LALPATHLAB	Dr. Lal Pathlabs	250	
+134	LAURUSLABS	Laurus Labs	850	
+135	LICHSGFIN	LIC Housing Finance	1000	
+136	LICI	LIC of India	700	
+137	LODHA	Macrotech Developers	450	
+138	LT	Larsen & Toubro	175	
+139	LTF	L&T Finance	2250	
+140	LTM	L&T Infotech Mindtree	150	
+141	LTTS	L&T Technology Services	200	
+142	LUPIN	Lupin	425	
+143	M&M	Mahindra & Mahindra	200	
+144	MANKIND	Mankind Pharma	225	
+145	MANAPPURAM	Manappuram Finance	3000	
+146	MARICO	Marico	1200	
+147	MARUTI	Maruti Suzuki	50	
+148	MAXHEALTH	Max Healthcare Institute	525	
+149	MAZDOCK	Mazagon Dock Shipbuilders	200	
+150	MCX	MCX	625	
+151	MFSL	Max Financial Services	400	
+152	MOTHERSON	Samvardhana Motherson	6150	
+153	MOTILALOFS	Motilal Oswal Fin Services	775	
+154	MPHASIS	Mphasis	275	
+155	MRF	MRF	10	
+156	MUTHOOTFIN	Muthoot Finance	275	
+157	NAM-INDIA	Nippon Life India AMC	625	
+158	NATIONALUM	NALCO	3750	
+159	NAUKRI	Info Edge (India)	375	
+160	NBCC	NBCC	6500	
+161	NCC	NCC Ltd	1775	
+162	NESTLEIND	Nestle India	500	
+163	NHPC	NHPC	6400	
+164	NMDC	NMDC	6750	
+165	NTPC	NTPC	1500	
+166	NUVAMA	Nuvama Wealth Management	500	
+167	NYKAA	FSN E-Commerce (Nykaa)	3125	
+168	OBEROIRLTY	Oberoi Realty	350	
+169	OFSS	Oracle Financial Services	75	
+170	OIL	Oil India	1400	
+171	ONGC	ONGC	2250	
+172	PAGEIND	Page Industries	15	
+173	PATANJALI	Patanjali Foods	900	
+174	PAYTM	One97 Communications	725	
+175	PEL	Piramal Enterprises	275	
+176	PERSISTENT	Persistent Systems	100	
+177	PETRONET	Petronet LNG	1900	
+178	PFC	Power Finance Corp	1300	
+179	PGEL	PG Electroplast	950	
+180	PHOENIXLTD	Phoenix Mills	350	
+181	PIDILITIND	Pidilite Industries	500	
+182	PIIND	PI Industries	175	
+183	PNB	Punjab National Bank	8000	
+184	PNBHOUSING	PNB Housing Finance	650	
+185	POLICYBZR	PB Fintech	350	
+186	POLYCAB	Polycab India	125	
+187	POONAWALLA	Poonawalla Fincorp	1450	
+188	POWERGRID	Power Grid Corp	1900	
+189	POWERINDIA	Hitachi Energy India	50	
+190	PREMIERENE	Premier Energies	575	
+191	PRESTIGE	Prestige Estates	450	
+192	RBLBANK	RBL Bank	3175	
+193	RECLTD	REC Ltd	1400	
+194	RELIANCE	Reliance Industries	500	
+195	RVNL	Rail Vikas Nigam	1525	
+196	SAIL	SAIL	4700	
+197	SAMMAANCAP	Sammaan Capital	4300	
+198	SBICARD	SBI Cards	800	
+199	SBILIFE	SBI Life Insurance	375	
+200	SBIN	State Bank of India	750	
+201	SHREECEM	Shree Cement	25	
+202	SHRIRAMFIN	Shriram Finance	825	
+203	SIEMENS	Siemens India	175	
+204	SJVN	SJVN Ltd	4725	
+205	SOLARINDS	Solar Industries	50	
+206	SONACOMS	Sona BLW Precision	1225	
+207	SRF	SRF Ltd	200	
+208	SUNPHARMA	Sun Pharma	350	
+209	SUPREMEIND	Supreme Industries	175	
+210	SUZLON	Suzlon Energy	9025	
+211	SWIGGY	Swiggy	1300	
+212	TATACHEM	Tata Chemicals	500	
+213	TATACONSUM	Tata Consumer Products	550	
+214	TATAELXSI	Tata Elxsi	100	
+215	TATAMOTORS	Tata Motors	1425	
+216	TATAPOWER	Tata Power	1450	
+217	TATASTEEL	Tata Steel	4250	
+218	TCS	Tata Consultancy Services	150	
+219	TECHM	Tech Mahindra	600	
+220	TIINDIA	Tube Investments of India	150	
+221	TITAN	Titan Company	375	
+222	TORNTPHARM	Torrent Pharmaceuticals	500	
+223	TORNTPOWER	Torrent Power	1500	
+224	TRENT	Trent Ltd	725	
+225	TVSMOTOR	TVS Motor	700	
+226	UBL	United Breweries	400	
+227	ULTRACEMCO	UltraTech Cement	100	
+228	UNIONBANK	Union Bank of India	4425	
+229	UPL	UPL Ltd	1300	
+230	VBL	Varun Beverages	875	
+231	VEDL	Vedanta	1550	
+232	VISHALMART	Vishal Mega Mart	4850	
+233	VOLTAS	Voltas	500	
+234	WIPRO	Wipro	1000	
+235	YESBANK	Yes Bank	2600	
+236	ZYDUSLIFE	Zydus Lifesciences	1800	
+237 WAAREE	Waaree Energies	175

@@ -95,7 +95,7 @@ class MultiBrokerDispatcher:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self.balance_mode = "split"  # "split", "angel_primary", "upstox_primary"
+        self.balance_mode = "upstox_primary"  # Changed from split to upstox_primary to utilize fast REST API
         self.equity_broker = "split" # "split", "angel", "upstox"
         self.options_broker = "upstox"
         self._angel_failures = 0
@@ -142,12 +142,13 @@ class MultiBrokerDispatcher:
             "equity_broker": self.equity_broker,
             "options_broker": self.options_broker,
             # Credentials parsing is not health. Report each layer separately so
-            # "the config file exists" can never be mistaken for "we are logged in".
+            # the UI can tell the difference between "Angel offline" and "Angel
+            # failing API requests".
             "angel_credentials": angel_available(),
             "upstox_credentials": upstox_creds_available(),
             "upstox_authenticated": upstox_session_available(),
-            "angel_available": angel_available() and self._angel_failures < 5,
-            "upstox_available": upstox_available() and self._upstox_failures < 5,
+            "angel_available": angel_available(),
+            "upstox_available": upstox_available(),
             "upstox_status": (
                 "OK" if upstox_session_available()
                 else "NO_ACCESS_TOKEN - run upstox_login.py to complete the OAuth flow "
@@ -192,13 +193,8 @@ class MultiBrokerDispatcher:
             return {"angel": [], "upstox": list(symbols)}
         if angel_ok:
             return {"angel": list(symbols), "upstox": []}
-        # Angel down: Upstox equity is degraded (no intraday intervals) but is
-        # better than nothing for the macro timeframes.
+        # Angel down: Upstox equity is now fully capable via 1m resampling
         if upstox_ok:
-            logger.warning(
-                "Angel unavailable; falling back to Upstox for equity history. "
-                "Upstox v2 cannot serve 15m/1h intervals, so intraday coverage will be incomplete."
-            )
             return {"angel": [], "upstox": list(symbols)}
         return {"angel": [], "upstox": []}
 
@@ -239,7 +235,7 @@ class MultiBrokerDispatcher:
         if to_dt is None:
             to_dt = datetime.now(IST_TZ)
         if from_dt is None:
-            if timeframe == "15m":
+            if timeframe in ("5m", "15m", "30m"):
                 from_dt = to_dt - timedelta(days=60)
             elif timeframe in ("1h", "4h"):
                 from_dt = to_dt - timedelta(days=365)

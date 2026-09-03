@@ -97,6 +97,32 @@ export interface Signal {
   /** Typical trade duration for this timeframe */
   expected_duration_hrs: number;
   active_timeframes?: SignalActiveTimeframes;
+  /** @nullable */
+  entry_price?: number | null;
+  /** @nullable */
+  signal_time?: string | null;
+  /** @nullable */
+  option_type?: string | null;
+  /** @nullable */
+  option_strike?: number | null;
+  /** @nullable */
+  option_symbol?: string | null;
+  /** @nullable */
+  option_entry?: number | null;
+  /** @nullable */
+  option_ltp?: number | null;
+  /** @nullable */
+  regime_15m?: string | null;
+  /** @nullable */
+  regime_1h?: string | null;
+  /** @nullable */
+  regime_4h?: string | null;
+  /** @nullable */
+  regime_1d?: string | null;
+  /** @nullable */
+  selected?: boolean | null;
+  /** @nullable */
+  selection_rank?: number | null;
 }
 
 export interface SignalsResponse {
@@ -152,6 +178,16 @@ export interface ActiveTrade {
   eta_hrs?: number | null;
   expected_duration_hrs: number;
   score: number;
+  /** @nullable */
+  option_type?: string | null;
+  /** @nullable */
+  option_strike?: number | null;
+  /** @nullable */
+  option_symbol?: string | null;
+  /** @nullable */
+  option_entry?: number | null;
+  /** @nullable */
+  option_ltp?: number | null;
 }
 
 export interface TradesResponse {
@@ -249,6 +285,28 @@ export interface ChartActiveTrade {
   setup?: string;
   /** @nullable */
   score?: number | null;
+  /** @nullable */
+  option_type?: string | null;
+  /** @nullable */
+  option_strike?: number | null;
+  /** @nullable */
+  option_symbol?: string | null;
+  /** @nullable */
+  option_entry?: number | null;
+  /** @nullable */
+  option_sl1?: number | null;
+  /** @nullable */
+  option_sl2?: number | null;
+  /** @nullable */
+  option_tsl?: number | null;
+  /** @nullable */
+  option_tp1?: number | null;
+  /** @nullable */
+  option_tp2?: number | null;
+  /** @nullable */
+  option_tp3?: number | null;
+  /** @nullable */
+  option_ltp?: number | null;
 }
 
 export interface ChartResponse {
@@ -260,7 +318,11 @@ export interface ChartResponse {
   current_price?: number | null;
   active_trade?: ChartActiveTrade | null;
   /** @nullable */
+  other_active_trades?: Record<string, any> | null;
+  /** @nullable */
   scan_run_at?: string | null;
+  loading?: boolean;
+  macd?: { time: number; macd: number; signal: number; histogram: number }[];
 }
 
 export interface AnalyticsMetricBreakdown {

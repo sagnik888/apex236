@@ -13,6 +13,10 @@ import Analytics from '@/pages/Analytics';
 import ChartView from '@/pages/ChartView';
 import HistoryPage from '@/pages/History';
 import SettingsPage from '@/pages/SettingsPage';
+import OptionsChain from '@/pages/OptionsChain';
+import OrderBook from '@/pages/OrderBook';
+import Backtest from '@/pages/Backtest';
+import ScreenerView from '@/pages/ScreenerView';
 
 const queryClient = new QueryClient();
 
@@ -34,6 +38,10 @@ function Router() {
         <Route path="/analytics" component={Analytics} />
         <Route path="/history" component={HistoryPage} />
         <Route path="/settings" component={SettingsPage} />
+        <Route path="/options" component={OptionsChain} />
+        <Route path="/orders" component={OrderBook} />
+        <Route path="/backtest" component={Backtest} />
+        <Route path="/screener" component={ScreenerView} />
         <Route path="/chart/:symbol/:timeframe" component={ChartView} />
         <Route component={NotFound} />
       </Switch>

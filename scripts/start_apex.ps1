@@ -111,15 +111,16 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 Write-Host "[1/5] Checking dashboard dependencies..."
 if (-not (Test-Path $frontendVite)) {
     Write-Host "Dashboard dependencies are missing or refer to an old project location. Repairing them..."
-    & $pnpmExe install --frozen-lockfile --force
+    & $pnpmExe install --no-frozen-lockfile --force
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $frontendVite)) {
-        throw "Could not repair the dashboard dependencies. Run 'pnpm install --frozen-lockfile --force' in $rootDir and try again."
+        throw "Could not repair the dashboard dependencies. Run 'pnpm install --no-frozen-lockfile --force' in `$rootDir and try again."
     }
 }
 
 Write-Host "[2/5] Stopping previous Apex instances..."
 Stop-ApexListener -Port 8080 -ExpectedCommandPattern "python_scanner[\\/]main\.py"
-Stop-ApexListener -Port 5173 -ExpectedCommandPattern "(?:vite|trading-dashboard)"
+Stop-ApexListener -Port 5174 -ExpectedCommandPattern "(?:vite|trading-dashboard)"
+Stop-ApexListener -Port 8000 -ExpectedCommandPattern "app\.main"
 
 Write-Host "[3/5] Starting Python backend..."
 $backendOut = Join-Path $logDir "backend.log"
@@ -144,15 +145,31 @@ try {
         -RedirectStandardOutput $frontendOut `
         -RedirectStandardError $frontendErr `
         -PassThru
-    Wait-ForHttp -Name "Dashboard" -Url "http://127.0.0.1:5173" -Process $frontendProcess -ErrorLog $frontendErr
+    Wait-ForHttp -Name "Dashboard" -Url "http://127.0.0.1:5174" -Process $frontendProcess -ErrorLog $frontendErr
+
+    Write-Host "[4b/5] Starting System Screener..."
+    $screenerDir = Join-Path $rootDir "artifacts\nse-fno-screener"
+    $screenerOut = Join-Path $logDir "screener.log"
+    $screenerErr = Join-Path $logDir "screener-error.log"
+    $screenerProcess = Start-Process -FilePath $pythonExe `
+        -ArgumentList @("-m", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000") `
+        -WorkingDirectory $screenerDir `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $screenerOut `
+        -RedirectStandardError $screenerErr `
+        -PassThru
+    Wait-ForHttp -Name "System Screener" -Url "http://127.0.0.1:8000/" -Process $screenerProcess -ErrorLog $screenerErr
 } catch {
     if ($backendProcess -and -not $backendProcess.HasExited) {
         Stop-Process -Id $backendProcess.Id -Force -ErrorAction SilentlyContinue
+    }
+    if ($screenerProcess -and -not $screenerProcess.HasExited) {
+        Stop-Process -Id $screenerProcess.Id -Force -ErrorAction SilentlyContinue
     }
     throw
 }
 
 Write-Host "[5/5] Apex is running. Backend PID: $($backendProcess.Id); frontend PID: $($frontendProcess.Id)"
 if (-not $NoBrowser) {
-    Start-Process "http://localhost:5173"
+    Start-Process "http://localhost:5174"
 }

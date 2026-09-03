@@ -421,9 +421,18 @@ class UpstoxClient:
         self.ensure_session()
         self._candle_gate.wait()
 
-        upstox_interval = INTERVAL_MAP.get(interval, interval)
-        if interval in ("1m", "5m", "15m", "30m"):
-            upstox_interval = INTERVAL_MAP[interval]
+        api_interval = interval
+        needs_resample = False
+        if interval in ("5m", "15m", "1h"):
+            api_interval = "1m"
+            needs_resample = True
+            # 1minute data can only be fetched for max 30 days at once
+            if (to_dt - from_dt).days > 30:
+                from_dt = max(from_dt, to_dt - timedelta(days=30))
+
+        upstox_interval = INTERVAL_MAP.get(api_interval, api_interval)
+        if api_interval in ("1m", "5m", "15m", "30m"):
+            upstox_interval = INTERVAL_MAP[api_interval]
 
         to_str = to_dt.astimezone(IST_TZ).strftime("%Y-%m-%d")
         from_str = from_dt.astimezone(IST_TZ).strftime("%Y-%m-%d")
@@ -451,20 +460,32 @@ class UpstoxClient:
                 for c in candles:
                     try:
                         ts = datetime.fromisoformat(c[0]).astimezone(IST_TZ)
-                        rows.append({
-                            "timestamp": ts,
-                            "open": float(c[1]),
-                            "high": float(c[2]),
-                            "low": float(c[3]),
-                            "close": float(c[4]),
-                            "volume": float(c[5]),
-                        })
+                        if ts >= from_dt and ts <= to_dt:
+                            rows.append({
+                                "timestamp": ts,
+                                "open": float(c[1]),
+                                "high": float(c[2]),
+                                "low": float(c[3]),
+                                "close": float(c[4]),
+                                "volume": int(c[5]),
+                            })
                     except Exception:
                         continue
                 if not rows:
                     return pd.DataFrame()
                 df = pd.DataFrame(rows).sort_values("timestamp").set_index("timestamp")
                 df = df[~df.index.duplicated(keep="last")]
+                
+                if needs_resample:
+                    rule = "5min" if interval == "5m" else "15min" if interval == "15m" else "60min"
+                    df = df.resample(rule, closed="left", label="left").agg({
+                        "open": "first",
+                        "high": "max",
+                        "low": "min",
+                        "close": "last",
+                        "volume": "sum"
+                    }).dropna()
+                    
                 return df
             except Exception as exc:
                 if attempt == 2:

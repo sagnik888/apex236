@@ -189,9 +189,14 @@ export default function Trades() {
                         <span className="text-[10px] uppercase text-signal-buy/70 font-semibold flex items-center gap-1 mb-0.5">
                           <Target className="h-3 w-3" /> T1
                         </span>
-                        <span className={`font-mono text-sm tabular-nums ${trade.t1_hit ? "line-through text-signal-buy/40" : "text-signal-buy/80"}`}>
-                          {trade.tp1.toFixed(2)}
-                        </span>
+                        <div className="flex flex-col gap-0.5">
+                          <span className={`font-mono text-sm tabular-nums ${trade.t1_hit ? "line-through text-signal-buy/40" : "text-signal-buy/80"}`}>
+                            {trade.tp1.toFixed(2)}
+                          </span>
+                          <span className="text-[10px] text-signal-buy/60 tabular-nums font-mono">
+                            (+{(((trade.tp1 - trade.entry_price) / trade.entry_price) * 100 * (trade.direction === "BUY" ? 1 : -1)).toFixed(1)}%)
+                          </span>
+                        </div>
                       </div>
 
                       {/* TP2 */}
@@ -200,9 +205,14 @@ export default function Trades() {
                           <span className="text-[10px] uppercase text-signal-buy/60 font-semibold flex items-center gap-1 mb-0.5">
                             <Target className="h-3 w-3" /> T2
                           </span>
-                          <span className={`font-mono text-sm tabular-nums ${trade.t2_hit ? "line-through text-signal-buy/40" : "text-signal-buy/60"}`}>
-                            {trade.tp2.toFixed(2)}
-                          </span>
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`font-mono text-sm tabular-nums ${trade.t2_hit ? "line-through text-signal-buy/40" : "text-signal-buy/60"}`}>
+                              {trade.tp2.toFixed(2)}
+                            </span>
+                            <span className="text-[10px] text-signal-buy/40 tabular-nums font-mono">
+                              (+{(((trade.tp2 - trade.entry_price) / trade.entry_price) * 100 * (trade.direction === "BUY" ? 1 : -1)).toFixed(1)}%)
+                            </span>
+                          </div>
                         </div>
                       )}
 
@@ -212,9 +222,14 @@ export default function Trades() {
                           <span className="text-[10px] uppercase text-signal-buy/50 font-semibold flex items-center gap-1 mb-0.5">
                             <Target className="h-3 w-3" /> T3
                           </span>
-                          <span className={`font-mono text-sm tabular-nums ${trade.t3_hit ? "line-through text-signal-buy/40" : "text-signal-buy/50"}`}>
-                            {trade.tp3.toFixed(2)}
-                          </span>
+                          <div className="flex flex-col gap-0.5">
+                            <span className={`font-mono text-sm tabular-nums ${trade.t3_hit ? "line-through text-signal-buy/40" : "text-signal-buy/50"}`}>
+                              {trade.tp3.toFixed(2)}
+                            </span>
+                            <span className="text-[10px] text-signal-buy/40 tabular-nums font-mono">
+                              (+{(((trade.tp3 - trade.entry_price) / trade.entry_price) * 100 * (trade.direction === "BUY" ? 1 : -1)).toFixed(1)}%)
+                            </span>
+                          </div>
                         </div>
                       )}
                     </div>

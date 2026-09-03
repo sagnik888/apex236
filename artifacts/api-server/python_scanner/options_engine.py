@@ -582,12 +582,9 @@ def execute_option_trade(
             "message": f"Could not determine option entry price for {tsym} ({inst_key})",
         }
 
-    # Apply the entry half-spread so the modeled entry reflects a realistic BUY
-    # fill rather than an optimistic last-traded print.
-    if ask > 0 and bid > 0 and ask >= bid:
-        entry_opt = (bid + ask) / 2.0 + (ask - bid) / 2.0  # = ask (marketable buy)
-    else:
-        entry_opt = entry_opt * 1.015  # ~1.5% half-spread fallback
+    # Removed artificial bid-ask markup to ensure the displayed option
+    # entry premium exactly matches the true LTP shown on broker terminals.
+    # We rely on actual limit/market execution logic for slippage instead.
     entry_opt = round(entry_opt, 2)
 
     # Estimate the holding horizon (days) so the option stop accounts for theta.

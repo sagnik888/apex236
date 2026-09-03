@@ -3,7 +3,7 @@ import { useGetSignals, useGetScannerStats, useTriggerScan, customFetch } from "
 import type { Signal } from "@workspace/api-client-react";
 import { useLocation, Link } from "wouter";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown, Sliders, Zap, AlertTriangle, IndianRupee, PieChart as PieChartIcon } from "lucide-react";
+import { Activity, ArrowUpRight, ArrowDownRight, RefreshCw, BarChart2, ChevronUp, ChevronDown, ChevronsUpDown, Sliders, Zap, AlertTriangle, IndianRupee, PieChart as PieChartIcon, Layers, List } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 type SortKey = "score" | "close" | "rsi" | "adx" | "pnl_pct" | "daily_move_pct" | "eta_hrs" | "signal_time";
@@ -144,6 +144,22 @@ function formatSignalTime(ts: string | unknown): string {
   }
 }
 
+function formatSignalTimeExact(ts: string | unknown): string {
+  if (!ts || typeof ts !== "string") return "—";
+  try {
+    const d = new Date(ts);
+    if (isNaN(d.getTime())) return "—"; // fallback
+    const parts = new Intl.DateTimeFormat("en-IN", {
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hour12: false, timeZone: "Asia/Kolkata",
+    }).formatToParts(d);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+    return `[${get("hour")},${get("minute")},${get("second")}]`;
+  } catch (e) {
+    return "—";
+  }
+}
+
 const SignalRow = memo(({ row, setLocation, appSettings }: any) => {
   const iSwing = (row.intraday_or_swing as string) === "Swing";
   const dailyMove = row.daily_move_pct as number | null | undefined;
@@ -175,7 +191,7 @@ const SignalRow = memo(({ row, setLocation, appSettings }: any) => {
                 <Zap className="h-2.5 w-2.5 fill-amber-400 flex-shrink-0" />
                 <span>{(row as any).option_type || (row.direction === "BUY" ? "CE" : "PE")}</span>
                 {(row as any).option_strike && <span className="font-mono text-amber-300">₹{(row as any).option_strike}</span>}
-                {(row as any).option_entry && <span className="font-mono text-signal-buy text-[8.5px]">(₹{(row as any).option_entry.toFixed(1)})</span>}
+                {((row as any).option_ltp || (row as any).option_entry) && <span className="font-mono text-signal-buy text-[8.5px]" title="Live Option Premium (LTP)">(₹{((row as any).option_ltp || (row as any).option_entry).toFixed(1)})</span>}
               </span>
             )}
             {(row as any).relative_volume && (row as any).relative_volume > 1.5 && (
@@ -188,9 +204,15 @@ const SignalRow = memo(({ row, setLocation, appSettings }: any) => {
       {/* TF + Intraday/Swing */}
       <td className="px-4 py-2.5">
         <div className="flex flex-col gap-0.5">
-          <span className="font-mono text-xs text-muted-foreground">{row.timeframe}</span>
-          <span className={`text-[9px] font-bold uppercase tracking-wider ${iSwing ? "text-purple-400" : "text-cyan-400"}`}>
-            {iSwing ? "Swing" : "Intra"}
+          <div className="flex items-center gap-1">
+            <span className="font-mono text-xs text-muted-foreground">{row.timeframe}</span>
+            <span className="text-muted-foreground opacity-50 text-[10px]">/</span>
+            <span className={`text-[9px] font-bold uppercase tracking-wider ${iSwing ? "text-purple-400" : "text-cyan-400"}`}>
+              {iSwing ? "Swing" : "Intra"}
+            </span>
+          </div>
+          <span className="font-mono text-[10px] text-muted-foreground/70 tracking-wide">
+            {formatSignalTimeExact(row.signal_time)}
           </span>
         </div>
       </td>
@@ -259,12 +281,26 @@ const SignalRow = memo(({ row, setLocation, appSettings }: any) => {
 
       {/* TP1 */}
       <td className="px-4 py-2.5 font-mono text-xs text-signal-buy/80 tabular-nums">
-        {row.tp1 != null ? row.tp1.toFixed(2) : "—"}
+        <div className="flex flex-col gap-0.5">
+          <span>{row.tp1 != null ? row.tp1.toFixed(2) : "-"}</span>
+          {row.entry_price != null && row.tp1 != null && (
+            <span className="text-[10px] text-signal-buy/60">
+              (+{(((row.tp1 - row.entry_price) / row.entry_price) * 100 * (row.direction === "BUY" ? 1 : -1)).toFixed(1)}%)
+            </span>
+          )}
+        </div>
       </td>
 
       {/* TP2 */}
       <td className="px-4 py-2.5 font-mono text-xs text-signal-buy/60 tabular-nums">
-        {row.tp2 != null ? row.tp2.toFixed(2) : "—"}
+        <div className="flex flex-col gap-0.5">
+          <span>{row.tp2 != null ? row.tp2.toFixed(2) : "-"}</span>
+          {row.entry_price != null && row.tp2 != null && (
+            <span className="text-[10px] text-signal-buy/40">
+              (+{(((row.tp2 - row.entry_price) / row.entry_price) * 100 * (row.direction === "BUY" ? 1 : -1)).toFixed(1)}%)
+            </span>
+          )}
+        </div>
       </td>
 
       {/* Day Change */}
@@ -414,7 +450,13 @@ export default function Dashboard() {
     { query: { refetchInterval: 15000, queryKey: ["/api/signals", timeframe, filter] } }
   );
 
-  const triggerScan = useTriggerScan();
+  const triggerScan = useTriggerScan({ 
+    request: { headers: { "Content-Type": "application/json" } },
+    mutation: {
+      onSuccess: () => alert("Force Scan Triggered Successfully!"),
+      onError: (err: any) => alert(`Force Scan Failed: ${err?.message || err}`)
+    }
+  });
 
   const { data: daybook } = useQuery({
     queryKey: ["/api/daybook"],
@@ -554,10 +596,27 @@ export default function Dashboard() {
 
           {/* Signal count */}
           {!isLoading && (
-            <span className="text-xs text-muted-foreground font-mono">
+            <span className="text-xs text-muted-foreground font-mono pr-2">
               {signals.length} signal{signals.length !== 1 ? "s" : ""}
             </span>
           )}
+
+          <div className="h-6 w-px bg-border hidden sm:block" />
+
+          <div className="flex gap-2">
+            <Link href="/options">
+              <Button variant="outline" size="sm" className="h-7 text-xs border-primary/20 hover:bg-primary/10 transition-colors">
+                <Layers className="h-3 w-3 mr-1.5 text-primary" />
+                Options Chain
+              </Button>
+            </Link>
+            <Link href="/orders">
+              <Button variant="outline" size="sm" className="h-7 text-xs border-primary/20 hover:bg-primary/10 transition-colors">
+                <List className="h-3 w-3 mr-1.5 text-primary" />
+                Order Book
+              </Button>
+            </Link>
+          </div>
         </div>
 
         <div className="flex items-center gap-4">

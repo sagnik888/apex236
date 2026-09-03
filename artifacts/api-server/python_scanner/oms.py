@@ -208,12 +208,39 @@ class OrderManager:
         try:
             from options_engine import execute_option_trade
             from settings_store import get_settings
-            qty = int(get_settings().get("default_quantity", 0) or 0)
-            if qty <= 0:
-                self._record("entry_rejected", {**intent, "reason": "no position size configured"})
+            _settings = get_settings()
+            default_qty = int(_settings.get("default_quantity", 0) or 0)
+
+            # RX-01 FIX: Dynamic risk-based position sizing
+            # Risk 1% of capital per trade. Fall back to default_quantity if
+            # stop-loss data isn't available for the calculation.
+            risk_pct = float(_settings.get("risk_per_trade_pct", 1.0))
+            capital = float(_settings.get("capital", 0) or 0)
+            per_share_risk = abs(float(entry_price) - float(stop)) if stop and float(stop) > 0 else 0.0
+
+            if capital > 0 and per_share_risk > 0:
+                risk_amount = capital * (risk_pct / 100.0)
+                qty = max(1, int(risk_amount / per_share_risk))
+                # Clamp to a sensible max to avoid fat-finger errors
+                max_qty = int(_settings.get("max_quantity", 5000) or 5000)
+                qty = min(qty, max_qty)
+                logger.info(
+                    "OMS: dynamic sizing for %s: capital=%.0f risk=%.1f%% "
+                    "per_share_risk=%.2f -> qty=%d",
+                    key, capital, risk_pct, per_share_risk, qty,
+                )
+            elif default_qty > 0:
+                qty = default_qty
+                logger.warning(
+                    "OMS: falling back to static default_quantity=%d for %s "
+                    "(capital=%.0f, per_share_risk=%.2f)",
+                    qty, key, capital, per_share_risk,
+                )
+            else:
+                self._record("entry_rejected", {**intent, "reason": "no position size: set capital + SL or default_quantity"})
                 logger.error(
-                    "OMS: refusing to trade %s - no default_quantity configured. "
-                    "The system has no position sizing model (see audit RX-04).", key,
+                    "OMS: refusing to trade %s - neither dynamic sizing nor "
+                    "default_quantity available.", key,
                 )
                 return None
 

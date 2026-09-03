@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "wouter";
-import { Activity, LayoutDashboard, PieChart, Circle, BarChart3, History, Settings } from "lucide-react";
+import { Activity, LayoutDashboard, PieChart, Circle, BarChart3, History, Settings, Layers, List, FlaskConical } from "lucide-react";
 import { useGetScannerStats, useGetSession } from "@workspace/api-client-react";
 import { useWebSocket } from "@/hooks/use-websocket";
 import { NotificationBell, NotificationToasts } from "@/components/notifications/NotificationCenter";
@@ -66,17 +66,21 @@ export function Shell({ children }: { children: React.ReactNode }) {
     <div className="flex h-[100dvh] w-full flex-col bg-background text-foreground overflow-hidden">
       {/* Top Navbar */}
       <header className="flex h-14 items-center justify-between gap-2 border-b border-border bg-card px-2 sm:px-4 shrink-0">
-        <div className="flex min-w-0 items-center gap-2 lg:gap-6">
-          <div className="flex shrink-0 items-center gap-2 text-primary font-bold tracking-tight">
-            <Activity className="h-5 w-5" />
-            <span className="hidden sm:block">APEX NSE 236</span>
-            <span className="sm:hidden">APEX</span>
+        <div className="flex min-w-0 flex-1 items-center gap-2 lg:gap-6">
+          <div className="flex flex-col shrink-0 justify-center">
+            <div className="flex items-center gap-2 text-primary font-bold tracking-tight leading-none">
+              <Activity className="h-5 w-5" />
+              <span>APEX</span>
+            </div>
+            <span className="text-muted-foreground text-[10px] font-mono tabular-nums mt-1 leading-none pl-7">
+              {istClock} IST
+            </span>
           </div>
 
-          <nav className="flex items-center gap-1">
+          <nav className="flex items-center gap-1 overflow-x-auto flex-1 [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
             <Link
               href="/"
-              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+              className={`flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                 location === "/" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
               }`}
             >
@@ -85,7 +89,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </Link>
             <Link
               href="/trades"
-              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+              className={`flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                 location === "/trades" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
               }`}
             >
@@ -94,7 +98,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </Link>
             <Link
               href="/analytics"
-              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+              className={`flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                 location === "/analytics" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
               }`}
             >
@@ -103,7 +107,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             </Link>
             <Link
               href="/history"
-              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+              className={`flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                 location === "/history" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
               }`}
             >
@@ -111,8 +115,26 @@ export function Shell({ children }: { children: React.ReactNode }) {
               <span className="hidden lg:block">History</span>
             </Link>
             <Link
+              href="/screener"
+              className={`flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                location === "/screener" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              <Layers className="h-4 w-4" />
+              <span className="hidden lg:block">System Screener</span>
+            </Link>
+            <Link
+              href="/backtest"
+              className={`flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+                location === "/backtest" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
+              }`}
+            >
+              <FlaskConical className="h-4 w-4" />
+              <span className="hidden lg:block">Backtest</span>
+            </Link>
+            <Link
               href="/settings"
-              className={`flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
+              className={`flex shrink-0 items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md transition-colors ${
                 location === "/settings" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-muted hover:text-foreground"
               }`}
             >
@@ -136,10 +158,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
             <span className="hidden sm:block">NSE</span> {sessionStatus.replace("_", "-")}
           </div>
 
-          {/* IST Clock — ticks every second client-side */}
-          <span className="text-muted-foreground text-xs font-mono hidden min-[1360px]:block tabular-nums">
-            {istClock} IST
-          </span>
+
 
           <SystemHealthPanel
             stats={stats}

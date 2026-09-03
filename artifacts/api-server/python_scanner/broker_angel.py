@@ -144,6 +144,7 @@ class AngelClient:
         self._auth_lock = threading.RLock()
         self._jwt: Optional[str] = None
         self._feed_token: Optional[str] = None
+        self._refresh_token_str: Optional[str] = None
         self._candle_gate = _RateGate(_CANDLE_MIN_INTERVAL)
         self._quote_gate = _RateGate(_QUOTE_MIN_INTERVAL)
         self._token_map: Optional[dict[str, dict]] = None
@@ -187,15 +188,22 @@ class AngelClient:
             if SESSION_CACHE.exists():
                 try:
                     saved = json.loads(SESSION_CACHE.read_text())
-                    if self._session_is_todays(saved) and saved.get("client_id") == self._env["ANGEL_CLIENT_ID"]:
-                        self._jwt = saved["jwt"]
-                        self._feed_token = saved["feed_token"]
-                        if self._probe_session():
+                    if saved.get("client_id") == self._env["ANGEL_CLIENT_ID"]:
+                        self._jwt = saved.get("jwt")
+                        self._feed_token = saved.get("feed_token")
+                        self._refresh_token_str = saved.get("refresh_token")
+                        
+                        if self._session_is_todays(saved) and self._probe_session():
                             logger.info("Angel session reused from cache")
                             return
-                        self._jwt = self._feed_token = None
+                            
+                        if self._refresh_token_str and self._refresh_token():
+                            logger.info("Angel session refreshed using token")
+                            return
+                            
+                        self._jwt = self._feed_token = self._refresh_token_str = None
                 except Exception:
-                    self._jwt = self._feed_token = None
+                    self._jwt = self._feed_token = self._refresh_token_str = None
             self._login()
 
     def _probe_session(self) -> bool:
@@ -203,6 +211,46 @@ class AngelClient:
             r = self._http.get(f"{BASE}/rest/secure/angelbroking/user/v1/getProfile", headers=self._headers(), timeout=10)
             return bool(r.ok and r.json().get("status"))
         except Exception:
+            return False
+
+    def _save_session(self) -> None:
+        try:
+            import tempfile
+            import os
+            fd, tmp_path = tempfile.mkstemp(dir=SESSION_CACHE.parent, prefix="angel_session_tmp_")
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({
+                    "client_id": self._env["ANGEL_CLIENT_ID"],
+                    "jwt": self._jwt,
+                    "feed_token": self._feed_token,
+                    "refresh_token": self._refresh_token_str,
+                    "saved_at": datetime.now(IST_TZ).isoformat(),
+                }, f)
+            os.replace(tmp_path, SESSION_CACHE)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    def _refresh_token(self) -> bool:
+        try:
+            r = self._http.post(
+                f"{BASE}/rest/auth/angelbroking/jwt/v1/generateTokens",
+                headers=self._headers(with_auth=False),
+                json={"refreshToken": self._refresh_token_str},
+                timeout=15,
+            )
+            body = r.json() if r.text.strip() else {}
+            if r.ok and body.get("status") and body.get("data"):
+                self._jwt = body["data"]["jwtToken"]
+                self._feed_token = body["data"]["feedToken"]
+                self._refresh_token_str = body["data"]["refreshToken"]
+                self._save_session()
+                return True
+            return False
+        except Exception as exc:
+            logger.warning("Angel token refresh failed: %s", exc)
             return False
 
     def _login(self) -> None:
@@ -226,24 +274,8 @@ class AngelClient:
                     raise RuntimeError(f"Angel login failed: HTTP {r.status_code} {body.get('message')!r} {body.get('errorcode')!r}")
                 self._jwt = body["data"]["jwtToken"]
                 self._feed_token = body["data"]["feedToken"]
-                try:
-                    import tempfile
-                    import os
-                    fd, tmp_path = tempfile.mkstemp(dir=SESSION_CACHE.parent, prefix="angel_session_tmp_")
-                    with os.fdopen(fd, "w", encoding="utf-8") as f:
-                        json.dump({
-                            "client_id": self._env["ANGEL_CLIENT_ID"],
-                            "jwt": self._jwt,
-                            "feed_token": self._feed_token,
-                            "saved_at": datetime.now(IST_TZ).isoformat(),
-                        }, f)
-                    os.replace(tmp_path, SESSION_CACHE)
-                except Exception:
-                    try:
-                        os.unlink(tmp_path)
-                    except OSError:
-                        pass
-                    pass
+                self._refresh_token_str = body["data"]["refreshToken"]
+                self._save_session()
                 logger.info("Angel login OK (fresh session)")
                 return
             except Exception as exc:

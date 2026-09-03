@@ -45,9 +45,11 @@ ANGEL_CACHE_DIR = HERE / "angel_cache"
 
 # ── Yahoo fetch config (fallback + 1d) ───────────────────────────────────────
 _FETCH_CONFIG: dict[str, dict] = {
+    "5m":  {"interval": "5m",  "period": "60d"},
     "15m": {"interval": "15m", "period": "60d"},
+    "30m": {"interval": "30m", "period": "60d"},
     "1h":  {"interval": "1h",  "period": "2y"},
-    "4h":  {"interval": "1h",  "period": "2y"},   # resample 1h → 4h
+    "4h":  {"interval": "1h",  "period": "2y"},   # resample 1h -> 4h
     "1d":  {"interval": "1d",  "period": "2y"},
 }
 
@@ -168,11 +170,30 @@ def _load_pickle_if_fresh(symbol: str, interval: str) -> Optional[pd.DataFrame]:
     path = _pickle_path(symbol, interval)
     try:
         if path.exists():
-            mtime = datetime.fromtimestamp(path.stat().st_mtime, _IST_TZ)
-            if mtime.date() >= (_now_ist() - timedelta(days=3)).date():
-                frame = pd.read_pickle(path)
-                if isinstance(frame, pd.DataFrame) and not frame.empty:
+            frame = pd.read_pickle(path)
+            if isinstance(frame, pd.DataFrame) and not frame.empty:
+                # FIX: Check actual data freshness, not just file modification time
+                # A file modified yesterday could contain data from weeks ago
+                last_bar = pd.Timestamp(frame.index[-1])
+                if last_bar.tzinfo is None:
+                    last_bar = last_bar.tz_localize(_IST_TZ)
+                else:
+                    last_bar = last_bar.astimezone(_IST_TZ)
+                
+                now = _now_ist()
+                age_hours = (now - last_bar).total_seconds() / 3600
+                
+                # For intraday (15m/1h): reject if data is older than 24 hours
+                # For daily: reject if data is older than 3 days
+                max_age_hours = 24 if interval in ("15m", "1h") else 72
+                
+                if age_hours <= max_age_hours:
                     return frame
+                else:
+                    logger.debug(
+                        "Pickle for %s/%s rejected: data is %.1f hours old (last bar: %s)",
+                        symbol, interval, age_hours, last_bar
+                    )
     except Exception:
         pass
     return None
@@ -262,11 +283,17 @@ def _bootstrap_interval(symbols: list[str], interval: str, lookback_days: int) -
     _BOOTSTRAP_STATE[state_key] = "running"
     client = _angel_client()
     now = _now_ist()
-    done = failed = 0
+    
+    _done_lock = threading.Lock()
+    _failed_lock = threading.Lock()
+    done = 0
+    failed = 0
     started = time.monotonic()
-    for symbol in symbols:
+
+    def _process_symbol(symbol: str) -> None:
+        nonlocal done, failed
         if symbol not in _ANGEL_TOKENS:
-            continue
+            return
         try:
             with _ANGEL_LOCK:
                 existing = store.get(symbol)
@@ -280,21 +307,29 @@ def _bootstrap_interval(symbols: list[str], interval: str, lookback_days: int) -
                 fetch_from = existing.index[-1].to_pydatetime() - timedelta(days=2)
             frame = client.get_candles(_ANGEL_TOKENS[symbol]["token"], interval, fetch_from, now)
             if frame is None:
-                failed += 1
-                continue
+                with _failed_lock:
+                    failed += 1
+                return
             frame = _drop_forming_bucket(frame, 15 if interval == "15m" else 60)
             if not frame.empty:
                 merged = _merge_frames(existing, frame)
                 with _ANGEL_LOCK:
                     store[symbol] = merged
                 _save_pickle(symbol, interval, merged)
-            done += 1
-            if done % 40 == 0:
-                logger.info("Angel %s bootstrap: %s/%s symbols (%.0fs elapsed)",
-                            interval, done, len(symbols), time.monotonic() - started)
+            with _done_lock:
+                done += 1
+                if done % 40 == 0:
+                    logger.info("Angel %s bootstrap: %s/%s symbols (%.0fs elapsed)",
+                                interval, done, len(symbols), time.monotonic() - started)
         except Exception as exc:
-            failed += 1
+            with _failed_lock:
+                failed += 1
             logger.warning("Angel bootstrap %s/%s failed: %s", symbol, interval, exc)
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        executor.map(_process_symbol, symbols)
+
     _BOOTSTRAP_STATE[state_key] = "ready" if done > 0 else "failed"
     _BOOTSTRAP_EVENTS[state_key].set()
     logger.info("Angel %s bootstrap finished: ok=%s failed=%s in %.0fs",
@@ -529,8 +564,11 @@ def prefetch_all_ohlcv(symbols: list[str], timeframes: list[str]) -> None:
                 from angel_feed import get_feed
                 get_feed().start(tokens)
                 if "15m" in angel_tfs and not _BOOTSTRAP_EVENTS["15m"].is_set():
-                    logger.info("Waiting for Angel 15m bootstrap (first run only)…")
+                    logger.info("Waiting for Angel 15m bootstrap (first run only).")
                     _BOOTSTRAP_EVENTS["15m"].wait(timeout=900)
+                if any(tf in ("1h", "4h") for tf in angel_tfs) and not _BOOTSTRAP_EVENTS["1h"].is_set():
+                    logger.info("Waiting for Angel 1h bootstrap (first run only).")
+                    _BOOTSTRAP_EVENTS["1h"].wait(timeout=900)
                 _absorb_feed_candles(angel_syms)
                 _detect_gaps(angel_syms)
         except Exception as exc:
@@ -916,7 +954,7 @@ def _yahoo_fetch(symbol: str, timeframe: str) -> Optional[pd.DataFrame]:
         df["volume"] = 0.0
 
     if df.index.tz is None:
-        df.index = df.index.tz_localize("UTC").tz_convert(IST)
+        df.index = df.index.tz_localize(IST)
     else:
         df.index = df.index.tz_convert(IST)
 
@@ -941,8 +979,15 @@ def _resample_4h(df: pd.DataFrame) -> pd.DataFrame:
     """Backwards-compatible alias used by older tests."""
     return _resample_intraday(df, "4h", None)
 
-def fetch_options_chain(symbol: str, expiry: Optional[str] = None) -> list[dict]:
+def fetch_options_chain(symbol: str, expiry: Optional[str] = None) -> dict:
     """Get full options chain from Upstox instrument master."""
+    # Apply F&O ticker aliases
+    try:
+        from options_engine import _FO_ALIASES
+        symbol = _FO_ALIASES.get(symbol.upper().replace('.NS', ''), symbol.upper().replace('.NS', ''))
+    except ImportError:
+        pass
+        
     cache_key = (symbol, expiry)
     now = time.time()
     
@@ -954,15 +999,15 @@ def fetch_options_chain(symbol: str, expiry: Optional[str] = None) -> list[dict]
     try:
         from broker_upstox import get_upstox_client, _parse_expiry
         client = get_upstox_client()
-        _, fo_index = client.instrument_map()
+        eq_index, fo_index = client.instrument_map()
         base = symbol.replace(".NS", "").replace("^NSEI", "NIFTY").replace("^NSEBANK", "BANKNIFTY").replace("NIFTY 50", "NIFTY").upper()
         contracts = fo_index.get(base, [])
         if not contracts:
-            return []
+            return {"chain": [], "expiries": [], "spot_price": 0.0}
         
         options = [c for c in contracts if str(c.get("instrument_type", "")).upper() in ("CE", "PE")]
         if not options:
-            return []
+            return {"chain": [], "expiries": [], "spot_price": 0.0}
             
         now_date = datetime.now(ZoneInfo("Asia/Kolkata")).date()
         valid = []
@@ -973,7 +1018,9 @@ def fetch_options_chain(symbol: str, expiry: Optional[str] = None) -> list[dict]
                 
         valid.sort(key=lambda x: x[0])
         if not valid:
-            return []
+            return {"chain": [], "expiries": [], "spot_price": 0.0}
+            
+        unique_expiries = sorted(list(set(x[0].strftime("%Y-%m-%d") for x in valid)))
             
         if expiry:
             target_expiry = expiry
@@ -987,8 +1034,18 @@ def fetch_options_chain(symbol: str, expiry: Optional[str] = None) -> list[dict]
                 chain_contracts.append(c)
                 if c.get("instrument_key"):
                     instrument_keys.append(c.get("instrument_key"))
+                    
+        # Get spot price
+        spot_price = 0.0
+        spot_ik = eq_index.get(base, {}).get("instrument_key")
+        if not spot_ik and base == "NIFTY":
+            spot_ik = eq_index.get("NIFTY 50", {}).get("instrument_key")
+        if spot_ik:
+            instrument_keys.append(spot_ik)
                 
         quotes = client.get_quote(instrument_keys)
+        if spot_ik and spot_ik in quotes:
+            spot_price = float(quotes[spot_ik].get("last_price") or quotes[spot_ik].get("ltp") or 0.0)
         
         chain = []
         for c in chain_contracts:
@@ -1011,11 +1068,12 @@ def fetch_options_chain(symbol: str, expiry: Optional[str] = None) -> list[dict]
                 "iv": float(greeks.get("iv") or 0.0),
             })
             
-        _CHAIN_CACHE[cache_key] = (now, chain)
-        return chain
+        result = {"chain": chain, "expiries": unique_expiries, "spot_price": spot_price}
+        _CHAIN_CACHE[cache_key] = (now, result)
+        return result
     except Exception as exc:
         logger.error(f"Error fetching options chain for {symbol}: {exc}")
-        return []
+        return {"chain": [], "expiries": [], "spot_price": 0.0}
 
 def fetch_option_greeks(instrument_key: str) -> dict:
     """Get real-time Greeks from Upstox market quote."""

@@ -1,0 +1,1898 @@
+[
+  {
+    "symbol": "360ONE",
+    "name": "360 One WAM",
+    "lot_size": 500,
+    "yahoo_ticker": "360ONE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "AARTIIND",
+    "name": "Aarti Industries",
+    "lot_size": 850,
+    "yahoo_ticker": "AARTIIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ABB",
+    "name": "ABB India",
+    "lot_size": 125,
+    "yahoo_ticker": "ABB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ABBOTINDIA",
+    "name": "Abbott India",
+    "lot_size": 40,
+    "yahoo_ticker": "ABBOTINDIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ABCAPITAL",
+    "name": "Aditya Birla Capital",
+    "lot_size": 3100,
+    "yahoo_ticker": "ABCAPITAL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ACC",
+    "name": "ACC Ltd",
+    "lot_size": 250,
+    "yahoo_ticker": "ACC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ADANIENT",
+    "name": "Adani Enterprises",
+    "lot_size": 309,
+    "yahoo_ticker": "ADANIENT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ADANIENSOL",
+    "name": "Adani Energy Solutions",
+    "lot_size": 675,
+    "yahoo_ticker": "ADANIENSOL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ADANIGREEN",
+    "name": "Adani Green Energy",
+    "lot_size": 600,
+    "yahoo_ticker": "ADANIGREEN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ADANIPORTS",
+    "name": "Adani Ports & SEZ",
+    "lot_size": 475,
+    "yahoo_ticker": "ADANIPORTS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ADANIPOWER",
+    "name": "Adani Power",
+    "lot_size": 3550,
+    "yahoo_ticker": "ADANIPOWER.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ALKEM",
+    "name": "Alkem Laboratories",
+    "lot_size": 125,
+    "yahoo_ticker": "ALKEM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "AMBER",
+    "name": "Amber Enterprises India",
+    "lot_size": 100,
+    "yahoo_ticker": "AMBER.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "AMBUJACEM",
+    "name": "Ambuja Cements",
+    "lot_size": 1050,
+    "yahoo_ticker": "AMBUJACEM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ANGELONE",
+    "name": "Angel One",
+    "lot_size": 2500,
+    "yahoo_ticker": "ANGELONE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "APLAPOLLO",
+    "name": "APL Apollo Tubes",
+    "lot_size": 350,
+    "yahoo_ticker": "APLAPOLLO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "APOLLOHOSP",
+    "name": "Apollo Hospitals",
+    "lot_size": 125,
+    "yahoo_ticker": "APOLLOHOSP.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ASHOKLEY",
+    "name": "Ashok Leyland",
+    "lot_size": 5000,
+    "yahoo_ticker": "ASHOKLEY.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ASIANPAINT",
+    "name": "Asian Paints",
+    "lot_size": 250,
+    "yahoo_ticker": "ASIANPAINT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ASTRAL",
+    "name": "Astral Ltd",
+    "lot_size": 425,
+    "yahoo_ticker": "ASTRAL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ATUL",
+    "name": "Atul Ltd",
+    "lot_size": 75,
+    "yahoo_ticker": "ATUL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "AUBANK",
+    "name": "AU Small Finance Bank",
+    "lot_size": 1000,
+    "yahoo_ticker": "AUBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "AUROPHARMA",
+    "name": "Aurobindo Pharma",
+    "lot_size": 550,
+    "yahoo_ticker": "AUROPHARMA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "AXISBANK",
+    "name": "Axis Bank",
+    "lot_size": 625,
+    "yahoo_ticker": "AXISBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BAJAJ-AUTO",
+    "name": "Bajaj Auto",
+    "lot_size": 75,
+    "yahoo_ticker": "BAJAJ-AUTO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BAJAJFINSV",
+    "name": "Bajaj Finserv",
+    "lot_size": 250,
+    "yahoo_ticker": "BAJAJFINSV.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BAJAJHLDNG",
+    "name": "Bajaj Holdings & Investments",
+    "lot_size": 50,
+    "yahoo_ticker": "BAJAJHLDNG.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BAJFINANCE",
+    "name": "Bajaj Finance",
+    "lot_size": 750,
+    "yahoo_ticker": "BAJFINANCE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BALKRISIND",
+    "name": "Balkrishna Industries",
+    "lot_size": 300,
+    "yahoo_ticker": "BALKRISIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BALRAMCHIN",
+    "name": "Balrampur Chini Mills",
+    "lot_size": 1600,
+    "yahoo_ticker": "BALRAMCHIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BANDHANBNK",
+    "name": "Bandhan Bank",
+    "lot_size": 3600,
+    "yahoo_ticker": "BANDHANBNK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BANKBARODA",
+    "name": "Bank of Baroda",
+    "lot_size": 2925,
+    "yahoo_ticker": "BANKBARODA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BANKINDIA",
+    "name": "Bank of India",
+    "lot_size": 5200,
+    "yahoo_ticker": "BANKINDIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BATAINDIA",
+    "name": "Bata India",
+    "lot_size": 275,
+    "yahoo_ticker": "BATAINDIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BDL",
+    "name": "Bharat Dynamics Ltd",
+    "lot_size": 350,
+    "yahoo_ticker": "BDL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BEL",
+    "name": "Bharat Electronics",
+    "lot_size": 1425,
+    "yahoo_ticker": "BEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BERGEPAINT",
+    "name": "Berger Paints",
+    "lot_size": 1100,
+    "yahoo_ticker": "BERGEPAINT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BHARATFORG",
+    "name": "Bharat Forge",
+    "lot_size": 500,
+    "yahoo_ticker": "BHARATFORG.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BHARTIARTL",
+    "name": "Bharti Airtel",
+    "lot_size": 475,
+    "yahoo_ticker": "BHARTIARTL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BHEL",
+    "name": "BHEL",
+    "lot_size": 2625,
+    "yahoo_ticker": "BHEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BIOCON",
+    "name": "Biocon",
+    "lot_size": 2500,
+    "yahoo_ticker": "BIOCON.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BLUESTARCO",
+    "name": "Blue Star",
+    "lot_size": 325,
+    "yahoo_ticker": "BLUESTARCO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BOSCHLTD",
+    "name": "Bosch Ltd",
+    "lot_size": 25,
+    "yahoo_ticker": "BOSCHLTD.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BPCL",
+    "name": "BPCL",
+    "lot_size": 1975,
+    "yahoo_ticker": "BPCL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BRITANNIA",
+    "name": "Britannia Industries",
+    "lot_size": 125,
+    "yahoo_ticker": "BRITANNIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "BSE",
+    "name": "BSE Ltd",
+    "lot_size": 375,
+    "yahoo_ticker": "BSE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CAMS",
+    "name": "CAMS",
+    "lot_size": 750,
+    "yahoo_ticker": "CAMS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CANBK",
+    "name": "Canara Bank",
+    "lot_size": 6750,
+    "yahoo_ticker": "CANBK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CANFINHOME",
+    "name": "Can Fin Homes",
+    "lot_size": 975,
+    "yahoo_ticker": "CANFINHOME.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CDSL",
+    "name": "CDSL",
+    "lot_size": 475,
+    "yahoo_ticker": "CDSL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CESC",
+    "name": "CESC Ltd",
+    "lot_size": 2925,
+    "yahoo_ticker": "CESC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CGPOWER",
+    "name": "CG Power & Industrial",
+    "lot_size": 850,
+    "yahoo_ticker": "CGPOWER.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CHAMBLFERT",
+    "name": "Chambal Fertilizers",
+    "lot_size": 1500,
+    "yahoo_ticker": "CHAMBLFERT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CHOLAFIN",
+    "name": "Cholamandalam Finance",
+    "lot_size": 625,
+    "yahoo_ticker": "CHOLAFIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CIPLA",
+    "name": "Cipla",
+    "lot_size": 375,
+    "yahoo_ticker": "CIPLA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "COALINDIA",
+    "name": "Coal India",
+    "lot_size": 1350,
+    "yahoo_ticker": "COALINDIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "COCHINSHIP",
+    "name": "Cochin Shipyard",
+    "lot_size": 400,
+    "yahoo_ticker": "COCHINSHIP.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "COFORGE",
+    "name": "Coforge",
+    "lot_size": 375,
+    "yahoo_ticker": "COFORGE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "COLPAL",
+    "name": "Colgate Palmolive",
+    "lot_size": 225,
+    "yahoo_ticker": "COLPAL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CONCOR",
+    "name": "Container Corp",
+    "lot_size": 1250,
+    "yahoo_ticker": "CONCOR.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "COROMANDEL",
+    "name": "Coromandel International",
+    "lot_size": 700,
+    "yahoo_ticker": "COROMANDEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CROMPTON",
+    "name": "Crompton Greaves Consumer",
+    "lot_size": 1800,
+    "yahoo_ticker": "CROMPTON.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "CUMMINSIND",
+    "name": "Cummins India",
+    "lot_size": 200,
+    "yahoo_ticker": "CUMMINSIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DABUR",
+    "name": "Dabur India",
+    "lot_size": 1250,
+    "yahoo_ticker": "DABUR.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DALBHARAT",
+    "name": "Dalmia Bharat",
+    "lot_size": 325,
+    "yahoo_ticker": "DALBHARAT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DEEPAKNTR",
+    "name": "Deepak Nitrite",
+    "lot_size": 250,
+    "yahoo_ticker": "DEEPAKNTR.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DELHIVERY",
+    "name": "Delhivery",
+    "lot_size": 2075,
+    "yahoo_ticker": "DELHIVERY.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DIVISLAB",
+    "name": "Divi\u2019s Laboratories",
+    "lot_size": 100,
+    "yahoo_ticker": "DIVISLAB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DIXON",
+    "name": "Dixon Technologies",
+    "lot_size": 50,
+    "yahoo_ticker": "DIXON.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DLF",
+    "name": "DLF",
+    "lot_size": 825,
+    "yahoo_ticker": "DLF.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DMART",
+    "name": "Avenue Supermarts",
+    "lot_size": 150,
+    "yahoo_ticker": "DMART.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "DRREDDY",
+    "name": "Dr. Reddy\u2019s Laboratories",
+    "lot_size": 625,
+    "yahoo_ticker": "DRREDDY.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "EICHERMOT",
+    "name": "Eicher Motors",
+    "lot_size": 100,
+    "yahoo_ticker": "EICHERMOT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ETERNAL",
+    "name": "Zomato (rebranded)",
+    "lot_size": 2425,
+    "yahoo_ticker": "ETERNAL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "EXIDEIND",
+    "name": "Exide Industries",
+    "lot_size": 1800,
+    "yahoo_ticker": "EXIDEIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "FEDERALBNK",
+    "name": "Federal Bank",
+    "lot_size": 5000,
+    "yahoo_ticker": "FEDERALBNK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "FORCEMOT",
+    "name": "Force Motors",
+    "lot_size": 25,
+    "yahoo_ticker": "FORCEMOT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "FORTIS",
+    "name": "Fortis Healthcare",
+    "lot_size": 775,
+    "yahoo_ticker": "FORTIS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GAIL",
+    "name": "GAIL India",
+    "lot_size": 3150,
+    "yahoo_ticker": "GAIL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GLENMARK",
+    "name": "Glenmark Pharmaceuticals",
+    "lot_size": 375,
+    "yahoo_ticker": "GLENMARK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GMRAIRPORT",
+    "name": "GMR Airports Infrastructure",
+    "lot_size": 6975,
+    "yahoo_ticker": "GMRAIRPORT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GODFRYPHLP",
+    "name": "Godfrey Phillips India",
+    "lot_size": 275,
+    "yahoo_ticker": "GODFRYPHLP.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GODREJCP",
+    "name": "Godrej Consumer Products",
+    "lot_size": 500,
+    "yahoo_ticker": "GODREJCP.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GODREJPROP",
+    "name": "Godrej Properties",
+    "lot_size": 275,
+    "yahoo_ticker": "GODREJPROP.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GRANULES",
+    "name": "Granules India",
+    "lot_size": 2000,
+    "yahoo_ticker": "GRANULES.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "GRASIM",
+    "name": "Grasim Industries",
+    "lot_size": 250,
+    "yahoo_ticker": "GRASIM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HAL",
+    "name": "Hindustan Aeronautics",
+    "lot_size": 150,
+    "yahoo_ticker": "HAL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HAVELLS",
+    "name": "Havells India",
+    "lot_size": 500,
+    "yahoo_ticker": "HAVELLS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HCLTECH",
+    "name": "HCL Technologies",
+    "lot_size": 350,
+    "yahoo_ticker": "HCLTECH.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HDFCAMC",
+    "name": "HDFC AMC",
+    "lot_size": 300,
+    "yahoo_ticker": "HDFCAMC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HDFCBANK",
+    "name": "HDFC Bank",
+    "lot_size": 550,
+    "yahoo_ticker": "HDFCBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HDFCLIFE",
+    "name": "HDFC Life Insurance",
+    "lot_size": 1100,
+    "yahoo_ticker": "HDFCLIFE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HEROMOTOCO",
+    "name": "Hero MotoCorp",
+    "lot_size": 150,
+    "yahoo_ticker": "HEROMOTOCO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HINDALCO",
+    "name": "Hindalco Industries",
+    "lot_size": 700,
+    "yahoo_ticker": "HINDALCO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HINDPETRO",
+    "name": "HPCL",
+    "lot_size": 2025,
+    "yahoo_ticker": "HINDPETRO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HINDUNILVR",
+    "name": "Hindustan Unilever",
+    "lot_size": 300,
+    "yahoo_ticker": "HINDUNILVR.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HINDZINC",
+    "name": "Hindustan Zinc",
+    "lot_size": 1225,
+    "yahoo_ticker": "HINDZINC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HUDCO",
+    "name": "HUDCO",
+    "lot_size": 2775,
+    "yahoo_ticker": "HUDCO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "HYUNDAI",
+    "name": "Hyundai Motor India",
+    "lot_size": 275,
+    "yahoo_ticker": "HYUNDAI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ICICIBANK",
+    "name": "ICICI Bank",
+    "lot_size": 700,
+    "yahoo_ticker": "ICICIBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ICICIGI",
+    "name": "ICICI Lombard GIC",
+    "lot_size": 325,
+    "yahoo_ticker": "ICICIGI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ICICIPRULI",
+    "name": "ICICI Pru Life Insurance",
+    "lot_size": 925,
+    "yahoo_ticker": "ICICIPRULI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IDEA",
+    "name": "Vodafone Idea",
+    "lot_size": 71475,
+    "yahoo_ticker": "IDEA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IDFCFIRSTB",
+    "name": "IDFC First Bank",
+    "lot_size": 9275,
+    "yahoo_ticker": "IDFCFIRSTB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IEX",
+    "name": "Indian Energy Exchange",
+    "lot_size": 3750,
+    "yahoo_ticker": "IEX.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IGL",
+    "name": "Indraprastha Gas",
+    "lot_size": 1375,
+    "yahoo_ticker": "IGL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INDHOTEL",
+    "name": "Indian Hotels Co",
+    "lot_size": 1000,
+    "yahoo_ticker": "INDHOTEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INDIAMART",
+    "name": "Indiamart Intermesh",
+    "lot_size": 150,
+    "yahoo_ticker": "INDIAMART.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INDIANB",
+    "name": "Indian Bank",
+    "lot_size": 1000,
+    "yahoo_ticker": "INDIANB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INDIGO",
+    "name": "InterGlobe Aviation",
+    "lot_size": 150,
+    "yahoo_ticker": "INDIGO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INDUSINDBK",
+    "name": "IndusInd Bank",
+    "lot_size": 700,
+    "yahoo_ticker": "INDUSINDBK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INDUSTOWER",
+    "name": "Indus Towers",
+    "lot_size": 1700,
+    "yahoo_ticker": "INDUSTOWER.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INFY",
+    "name": "Infosys",
+    "lot_size": 400,
+    "yahoo_ticker": "INFY.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "INOXWIND",
+    "name": "Inox Wind",
+    "lot_size": 3575,
+    "yahoo_ticker": "INOXWIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IOC",
+    "name": "Indian Oil Corporation",
+    "lot_size": 4875,
+    "yahoo_ticker": "IOC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IPCALAB",
+    "name": "IPCA Laboratories",
+    "lot_size": 650,
+    "yahoo_ticker": "IPCALAB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IRCTC",
+    "name": "IRCTC",
+    "lot_size": 875,
+    "yahoo_ticker": "IRCTC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IREDA",
+    "name": "IREDA",
+    "lot_size": 3450,
+    "yahoo_ticker": "IREDA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "IRFC",
+    "name": "IRFC",
+    "lot_size": 4250,
+    "yahoo_ticker": "IRFC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ITC",
+    "name": "ITC Ltd",
+    "lot_size": 1600,
+    "yahoo_ticker": "ITC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "JIOFIN",
+    "name": "Jio Financial Services",
+    "lot_size": 2350,
+    "yahoo_ticker": "JIOFIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "JINDALSTEL",
+    "name": "Jindal Steel & Power",
+    "lot_size": 625,
+    "yahoo_ticker": "JINDALSTEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "JSL",
+    "name": "Jindal Stainless",
+    "lot_size": 775,
+    "yahoo_ticker": "JSL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "JSWENERGY",
+    "name": "JSW Energy",
+    "lot_size": 1000,
+    "yahoo_ticker": "JSWENERGY.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "JSWSTEEL",
+    "name": "JSW Steel",
+    "lot_size": 675,
+    "yahoo_ticker": "JSWSTEEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "JUBLFOOD",
+    "name": "Jubilant Foodworks",
+    "lot_size": 1250,
+    "yahoo_ticker": "JUBLFOOD.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "KALYANKJIL",
+    "name": "Kalyan Jewellers India",
+    "lot_size": 1175,
+    "yahoo_ticker": "KALYANKJIL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "KAYNES",
+    "name": "Kaynes Technology India",
+    "lot_size": 100,
+    "yahoo_ticker": "KAYNES.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "KEI",
+    "name": "KEI Industries",
+    "lot_size": 175,
+    "yahoo_ticker": "KEI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "KFINTECH",
+    "name": "KFin Technologies",
+    "lot_size": 500,
+    "yahoo_ticker": "KFINTECH.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "KOTAKBANK",
+    "name": "Kotak Mahindra Bank",
+    "lot_size": 2000,
+    "yahoo_ticker": "KOTAKBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "KPITTECH",
+    "name": "KPIT Technologies",
+    "lot_size": 425,
+    "yahoo_ticker": "KPITTECH.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LALPATHLAB",
+    "name": "Dr. Lal Pathlabs",
+    "lot_size": 250,
+    "yahoo_ticker": "LALPATHLAB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LAURUSLABS",
+    "name": "Laurus Labs",
+    "lot_size": 850,
+    "yahoo_ticker": "LAURUSLABS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LICHSGFIN",
+    "name": "LIC Housing Finance",
+    "lot_size": 1000,
+    "yahoo_ticker": "LICHSGFIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LICI",
+    "name": "LIC of India",
+    "lot_size": 700,
+    "yahoo_ticker": "LICI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LODHA",
+    "name": "Macrotech Developers",
+    "lot_size": 450,
+    "yahoo_ticker": "LODHA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LT",
+    "name": "Larsen & Toubro",
+    "lot_size": 175,
+    "yahoo_ticker": "LT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LTF",
+    "name": "L&T Finance",
+    "lot_size": 2250,
+    "yahoo_ticker": "LTF.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LTM",
+    "name": "L&T Infotech Mindtree",
+    "lot_size": 150,
+    "yahoo_ticker": "LTM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LTTS",
+    "name": "L&T Technology Services",
+    "lot_size": 200,
+    "yahoo_ticker": "LTTS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "LUPIN",
+    "name": "Lupin",
+    "lot_size": 425,
+    "yahoo_ticker": "LUPIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "M&M",
+    "name": "Mahindra & Mahindra",
+    "lot_size": 200,
+    "yahoo_ticker": "M&M.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MANKIND",
+    "name": "Mankind Pharma",
+    "lot_size": 225,
+    "yahoo_ticker": "MANKIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MANAPPURAM",
+    "name": "Manappuram Finance",
+    "lot_size": 3000,
+    "yahoo_ticker": "MANAPPURAM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MARICO",
+    "name": "Marico",
+    "lot_size": 1200,
+    "yahoo_ticker": "MARICO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MARUTI",
+    "name": "Maruti Suzuki",
+    "lot_size": 50,
+    "yahoo_ticker": "MARUTI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MAXHEALTH",
+    "name": "Max Healthcare Institute",
+    "lot_size": 525,
+    "yahoo_ticker": "MAXHEALTH.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MAZDOCK",
+    "name": "Mazagon Dock Shipbuilders",
+    "lot_size": 200,
+    "yahoo_ticker": "MAZDOCK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MCX",
+    "name": "MCX",
+    "lot_size": 625,
+    "yahoo_ticker": "MCX.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MFSL",
+    "name": "Max Financial Services",
+    "lot_size": 400,
+    "yahoo_ticker": "MFSL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MOTHERSON",
+    "name": "Samvardhana Motherson",
+    "lot_size": 6150,
+    "yahoo_ticker": "MOTHERSON.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MOTILALOFS",
+    "name": "Motilal Oswal Fin Services",
+    "lot_size": 775,
+    "yahoo_ticker": "MOTILALOFS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MPHASIS",
+    "name": "Mphasis",
+    "lot_size": 275,
+    "yahoo_ticker": "MPHASIS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MRF",
+    "name": "MRF",
+    "lot_size": 10,
+    "yahoo_ticker": "MRF.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "MUTHOOTFIN",
+    "name": "Muthoot Finance",
+    "lot_size": 275,
+    "yahoo_ticker": "MUTHOOTFIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NAM-INDIA",
+    "name": "Nippon Life India AMC",
+    "lot_size": 625,
+    "yahoo_ticker": "NAM-INDIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NATIONALUM",
+    "name": "NALCO",
+    "lot_size": 3750,
+    "yahoo_ticker": "NATIONALUM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NAUKRI",
+    "name": "Info Edge (India)",
+    "lot_size": 375,
+    "yahoo_ticker": "NAUKRI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NBCC",
+    "name": "NBCC",
+    "lot_size": 6500,
+    "yahoo_ticker": "NBCC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NCC",
+    "name": "NCC Ltd",
+    "lot_size": 1775,
+    "yahoo_ticker": "NCC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NESTLEIND",
+    "name": "Nestle India",
+    "lot_size": 500,
+    "yahoo_ticker": "NESTLEIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NHPC",
+    "name": "NHPC",
+    "lot_size": 6400,
+    "yahoo_ticker": "NHPC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NMDC",
+    "name": "NMDC",
+    "lot_size": 6750,
+    "yahoo_ticker": "NMDC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NTPC",
+    "name": "NTPC",
+    "lot_size": 1500,
+    "yahoo_ticker": "NTPC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NUVAMA",
+    "name": "Nuvama Wealth Management",
+    "lot_size": 500,
+    "yahoo_ticker": "NUVAMA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "NYKAA",
+    "name": "FSN E-Commerce (Nykaa)",
+    "lot_size": 3125,
+    "yahoo_ticker": "NYKAA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "OBEROIRLTY",
+    "name": "Oberoi Realty",
+    "lot_size": 350,
+    "yahoo_ticker": "OBEROIRLTY.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "OFSS",
+    "name": "Oracle Financial Services",
+    "lot_size": 75,
+    "yahoo_ticker": "OFSS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "OIL",
+    "name": "Oil India",
+    "lot_size": 1400,
+    "yahoo_ticker": "OIL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ONGC",
+    "name": "ONGC",
+    "lot_size": 2250,
+    "yahoo_ticker": "ONGC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PAGEIND",
+    "name": "Page Industries",
+    "lot_size": 15,
+    "yahoo_ticker": "PAGEIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PATANJALI",
+    "name": "Patanjali Foods",
+    "lot_size": 900,
+    "yahoo_ticker": "PATANJALI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PAYTM",
+    "name": "One97 Communications",
+    "lot_size": 725,
+    "yahoo_ticker": "PAYTM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PEL",
+    "name": "Piramal Enterprises",
+    "lot_size": 275,
+    "yahoo_ticker": "PEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PERSISTENT",
+    "name": "Persistent Systems",
+    "lot_size": 100,
+    "yahoo_ticker": "PERSISTENT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PETRONET",
+    "name": "Petronet LNG",
+    "lot_size": 1900,
+    "yahoo_ticker": "PETRONET.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PFC",
+    "name": "Power Finance Corp",
+    "lot_size": 1300,
+    "yahoo_ticker": "PFC.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PGEL",
+    "name": "PG Electroplast",
+    "lot_size": 950,
+    "yahoo_ticker": "PGEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PHOENIXLTD",
+    "name": "Phoenix Mills",
+    "lot_size": 350,
+    "yahoo_ticker": "PHOENIXLTD.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PIDILITIND",
+    "name": "Pidilite Industries",
+    "lot_size": 500,
+    "yahoo_ticker": "PIDILITIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PIIND",
+    "name": "PI Industries",
+    "lot_size": 175,
+    "yahoo_ticker": "PIIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PNB",
+    "name": "Punjab National Bank",
+    "lot_size": 8000,
+    "yahoo_ticker": "PNB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PNBHOUSING",
+    "name": "PNB Housing Finance",
+    "lot_size": 650,
+    "yahoo_ticker": "PNBHOUSING.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "POLICYBZR",
+    "name": "PB Fintech",
+    "lot_size": 350,
+    "yahoo_ticker": "POLICYBZR.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "POLYCAB",
+    "name": "Polycab India",
+    "lot_size": 125,
+    "yahoo_ticker": "POLYCAB.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "POONAWALLA",
+    "name": "Poonawalla Fincorp",
+    "lot_size": 1450,
+    "yahoo_ticker": "POONAWALLA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "POWERGRID",
+    "name": "Power Grid Corp",
+    "lot_size": 1900,
+    "yahoo_ticker": "POWERGRID.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "POWERINDIA",
+    "name": "Hitachi Energy India",
+    "lot_size": 50,
+    "yahoo_ticker": "POWERINDIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PREMIERENE",
+    "name": "Premier Energies",
+    "lot_size": 575,
+    "yahoo_ticker": "PREMIERENE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "PRESTIGE",
+    "name": "Prestige Estates",
+    "lot_size": 450,
+    "yahoo_ticker": "PRESTIGE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "RBLBANK",
+    "name": "RBL Bank",
+    "lot_size": 3175,
+    "yahoo_ticker": "RBLBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "RECLTD",
+    "name": "REC Ltd",
+    "lot_size": 1400,
+    "yahoo_ticker": "RECLTD.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "RELIANCE",
+    "name": "Reliance Industries",
+    "lot_size": 500,
+    "yahoo_ticker": "RELIANCE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "RVNL",
+    "name": "Rail Vikas Nigam",
+    "lot_size": 1525,
+    "yahoo_ticker": "RVNL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SAIL",
+    "name": "SAIL",
+    "lot_size": 4700,
+    "yahoo_ticker": "SAIL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SAMMAANCAP",
+    "name": "Sammaan Capital",
+    "lot_size": 4300,
+    "yahoo_ticker": "SAMMAANCAP.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SBICARD",
+    "name": "SBI Cards",
+    "lot_size": 800,
+    "yahoo_ticker": "SBICARD.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SBILIFE",
+    "name": "SBI Life Insurance",
+    "lot_size": 375,
+    "yahoo_ticker": "SBILIFE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SBIN",
+    "name": "State Bank of India",
+    "lot_size": 750,
+    "yahoo_ticker": "SBIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SHREECEM",
+    "name": "Shree Cement",
+    "lot_size": 25,
+    "yahoo_ticker": "SHREECEM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SHRIRAMFIN",
+    "name": "Shriram Finance",
+    "lot_size": 825,
+    "yahoo_ticker": "SHRIRAMFIN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SIEMENS",
+    "name": "Siemens India",
+    "lot_size": 175,
+    "yahoo_ticker": "SIEMENS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SJVN",
+    "name": "SJVN Ltd",
+    "lot_size": 4725,
+    "yahoo_ticker": "SJVN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SOLARINDS",
+    "name": "Solar Industries",
+    "lot_size": 50,
+    "yahoo_ticker": "SOLARINDS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SONACOMS",
+    "name": "Sona BLW Precision",
+    "lot_size": 1225,
+    "yahoo_ticker": "SONACOMS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SRF",
+    "name": "SRF Ltd",
+    "lot_size": 200,
+    "yahoo_ticker": "SRF.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SUNPHARMA",
+    "name": "Sun Pharma",
+    "lot_size": 350,
+    "yahoo_ticker": "SUNPHARMA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SUPREMEIND",
+    "name": "Supreme Industries",
+    "lot_size": 175,
+    "yahoo_ticker": "SUPREMEIND.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SUZLON",
+    "name": "Suzlon Energy",
+    "lot_size": 9025,
+    "yahoo_ticker": "SUZLON.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "SWIGGY",
+    "name": "Swiggy",
+    "lot_size": 1300,
+    "yahoo_ticker": "SWIGGY.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TATACHEM",
+    "name": "Tata Chemicals",
+    "lot_size": 500,
+    "yahoo_ticker": "TATACHEM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TATACONSUM",
+    "name": "Tata Consumer Products",
+    "lot_size": 550,
+    "yahoo_ticker": "TATACONSUM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TATAELXSI",
+    "name": "Tata Elxsi",
+    "lot_size": 100,
+    "yahoo_ticker": "TATAELXSI.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TATAMOTORS",
+    "name": "Tata Motors",
+    "lot_size": 1425,
+    "yahoo_ticker": "TATAMOTORS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TATAPOWER",
+    "name": "Tata Power",
+    "lot_size": 1450,
+    "yahoo_ticker": "TATAPOWER.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TATASTEEL",
+    "name": "Tata Steel",
+    "lot_size": 4250,
+    "yahoo_ticker": "TATASTEEL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TCS",
+    "name": "Tata Consultancy Services",
+    "lot_size": 150,
+    "yahoo_ticker": "TCS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TECHM",
+    "name": "Tech Mahindra",
+    "lot_size": 600,
+    "yahoo_ticker": "TECHM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TIINDIA",
+    "name": "Tube Investments of India",
+    "lot_size": 150,
+    "yahoo_ticker": "TIINDIA.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TITAN",
+    "name": "Titan Company",
+    "lot_size": 375,
+    "yahoo_ticker": "TITAN.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TORNTPHARM",
+    "name": "Torrent Pharmaceuticals",
+    "lot_size": 500,
+    "yahoo_ticker": "TORNTPHARM.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TORNTPOWER",
+    "name": "Torrent Power",
+    "lot_size": 1500,
+    "yahoo_ticker": "TORNTPOWER.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TRENT",
+    "name": "Trent Ltd",
+    "lot_size": 725,
+    "yahoo_ticker": "TRENT.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "TVSMOTOR",
+    "name": "TVS Motor",
+    "lot_size": 700,
+    "yahoo_ticker": "TVSMOTOR.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "UBL",
+    "name": "United Breweries",
+    "lot_size": 400,
+    "yahoo_ticker": "UBL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ULTRACEMCO",
+    "name": "UltraTech Cement",
+    "lot_size": 100,
+    "yahoo_ticker": "ULTRACEMCO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "UNIONBANK",
+    "name": "Union Bank of India",
+    "lot_size": 4425,
+    "yahoo_ticker": "UNIONBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "UPL",
+    "name": "UPL Ltd",
+    "lot_size": 1300,
+    "yahoo_ticker": "UPL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "VBL",
+    "name": "Varun Beverages",
+    "lot_size": 875,
+    "yahoo_ticker": "VBL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "VEDL",
+    "name": "Vedanta",
+    "lot_size": 1550,
+    "yahoo_ticker": "VEDL.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "VISHALMART",
+    "name": "Vishal Mega Mart",
+    "lot_size": 4850,
+    "yahoo_ticker": "VISHALMART.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "VOLTAS",
+    "name": "Voltas",
+    "lot_size": 500,
+    "yahoo_ticker": "VOLTAS.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "WIPRO",
+    "name": "Wipro",
+    "lot_size": 1000,
+    "yahoo_ticker": "WIPRO.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "YESBANK",
+    "name": "Yes Bank",
+    "lot_size": 2600,
+    "yahoo_ticker": "YESBANK.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "ZYDUSLIFE",
+    "name": "Zydus Lifesciences",
+    "lot_size": 1800,
+    "yahoo_ticker": "ZYDUSLIFE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  },
+  {
+    "symbol": "WAAREE",
+    "name": "Waaree Energies",
+    "lot_size": 175,
+    "yahoo_ticker": "WAAREE.NS",
+    "upstox_instrument_key": null,
+    "note": ""
+  }
+]

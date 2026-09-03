@@ -33,36 +33,7 @@ SCAN_SYMBOLS: list[str] = NIFTY236_SYMBOLS[:_symbol_limit] if _symbol_limit > 0 
 
 
 def scan_worker_count() -> int:
-    """Scan-pool size, sized to the machine.
-
-    The scan pool is a ProcessPoolExecutor, so this is genuinely parallel CPU
-    work with no GIL contention — but it is CPU-bound pandas, so the target is
-    PHYSICAL cores, not SMT threads. The old default capped at 4 regardless of
-    the host, which left most of a 10-core machine idle while a full
-    four-timeframe cycle took four times longer than it needed to.
-
-    Policy: ~75% of logical CPUs, always leaving at least 4 free for the
-    FastAPI event loop, the two broker tick feeds, the OMS pool, the healer
-    thread and the OS. Capped at 16 so a very large host does not spawn more
-    processes than the memory budget allows — each worker is a separate Python
-    process carrying its own pandas/numpy (~200-300 MB resident).
-
-    On the deployment target (i7-13th gen, 10 physical cores / 16 threads,
-    16 GB) this yields 12 workers: 75% of threads, ~3.5 GB of worker memory.
-
-    Override with APEX_SCAN_WORKERS.
-    """
-    override = os.getenv("APEX_SCAN_WORKERS", "").strip()
-    if override:
-        try:
-            return max(1, int(override))
-        except ValueError:
-            logger.warning("Ignoring non-numeric APEX_SCAN_WORKERS=%r", override)
-    cpus = os.cpu_count() or 2
-    # Latency optimization: target ~65% of logical CPUs based on user constraints (10-11 workers on a 16-thread CPU)
-    # This leaves plenty of headroom for the OS, event loops, and UI.
-    target = int(cpus * 0.65)
-    return max(1, min(16, target))
+    return 3
 
 
 # How often each timeframe is rescanned, in 60-second scan cycles. Smaller
@@ -75,9 +46,9 @@ def scan_worker_count() -> int:
 # 15, so one cycle a half-hour carried every timeframe at once.
 _TF_SCAN_SCHEDULE: dict[str, tuple[int, int]] = {
     "15m": (1, 0),    # every minute
-    "1h": (5, 0),     # minutes 5, 10, 15 ...
-    "4h": (10, 3),    # minutes 3, 13, 23 ...
-    "1d": (15, 7),    # minutes 7, 22, 37 ...
+    "1h": (1, 0),     # every minute (no API cost, driven by local websocket)
+    "4h": (2, 1),     # every 2 minutes (no API cost, resampled locally)
+    "1d": (5, 2),     # every 5 minutes (external Yahoo API fetch, must protect rate limits)
 }
 
 
@@ -391,6 +362,12 @@ def build_configs() -> dict[str, ApexConfig]:
         if "trade_style" in s:
             cfg.trade_style = str(s["trade_style"])
         cfg.timeframe = tf  # let run_symbol apply timeframe-aware style rules
+        # ML-01 FIX: Wire the trained XGBoost model so it actually loads.
+        # score_model_path was always "" so the AI scoring block never activated.
+        from pathlib import Path
+        _model_path = Path(__file__).parent / "apex_score_model.json"
+        if _model_path.exists():
+            cfg.score_model_path = str(_model_path)
         cfg.validate()
         configs[tf] = cfg
     return configs
@@ -486,7 +463,7 @@ def _daily_move_pct(result: SymbolResult) -> Optional[float]:
 
 
 def _trade_age_hrs(entry_ts: Any) -> Optional[float]:
-    """Return elapsed hours since entry_ts in Asia/Kolkata time."""
+    """Return elapsed MARKET hours since entry_ts in Asia/Kolkata time."""
     if entry_ts is None or pd.isna(entry_ts) or entry_ts == "" or entry_ts == "—":
         return None
     try:
@@ -496,8 +473,33 @@ def _trade_age_hrs(entry_ts: Any) -> Optional[float]:
             dt = dt.tz_localize(IST_TZ)
         else:
             dt = dt.tz_convert(IST_TZ)
-        diff_sec = (now_dt - dt).total_seconds()
-        return round(max(0.0, diff_sec / 3600.0), 1)
+            
+        if dt > now_dt:
+            return 0.0
+            
+        market_open = pd.Timedelta(hours=9, minutes=15)
+        market_close = pd.Timedelta(hours=15, minutes=30)
+        
+        # Calculate business days between signal and now
+        bdays = pd.bdate_range(dt.date(), now_dt.date())
+        if len(bdays) == 0:
+            return 0.0
+            
+        total_seconds = 0.0
+        for day in bdays:
+            day_start = pd.Timestamp(day) + market_open
+            day_end = pd.Timestamp(day) + market_close
+            
+            day_start = day_start.tz_localize(IST_TZ)
+            day_end = day_end.tz_localize(IST_TZ)
+            
+            overlap_start = max(dt, day_start)
+            overlap_end = min(now_dt, day_end)
+            
+            if overlap_start < overlap_end:
+                total_seconds += (overlap_end - overlap_start).total_seconds()
+                
+        return round(total_seconds / 3600.0, 1)
     except Exception:
         return None
 
@@ -649,7 +651,7 @@ class ScannerEngine:
         self._chart_pending: set[tuple[str, str]] = set()
         self._chart_lock = Lock()
         self._chart_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="apex-chart")
-        self._scan_executor: Optional[ProcessPoolExecutor] = None
+        self._scan_executor: Optional[ThreadPoolExecutor] = None
 
         # Keep analytics route latency deterministic even while the first scan
         # is still building. These empty snapshots are replaced atomically when
@@ -657,9 +659,9 @@ class ScannerEngine:
         for tenure in ("1d", "7d", "30d", "90d", "180d", "365d"):
             self.get_analytics(tenure)
 
-    def _get_scan_executor(self) -> ProcessPoolExecutor:
+    def _get_scan_executor(self) -> ThreadPoolExecutor:
         if self._scan_executor is None:
-            self._scan_executor = ProcessPoolExecutor(max_workers=scan_worker_count())
+            self._scan_executor = ThreadPoolExecutor(max_workers=4)
         return self._scan_executor
 
     def shutdown(self) -> None:
@@ -905,6 +907,7 @@ class ScannerEngine:
                     quotes = upstox.get_quote(list(active_opt_keys))
                     for key, q in quotes.items():
                         live_option_ltps[key] = float(q.get("last_price", math.nan))
+                    logger.info(f"DEBUG: active_opt_keys={active_opt_keys} quotes_returned={list(quotes.keys())} live_option_ltps={live_option_ltps}")
                 except Exception as e:
                     logger.warning(f"Failed to fetch live option premiums: {e}")
 
@@ -930,7 +933,8 @@ class ScannerEngine:
                     # Find option_ltp for this symbol if active
                     opt_ltp = math.nan
                     with self._results_lock:
-                        res = self._results.get(tf, {}).get(symbol)
+                        display = symbol.replace(".NS", "")
+                        res = self._results.get(tf, {}).get(display)
                         if res and res.latest.get("state") in ("ACTIVE", "PENDING"):
                             opt_sym = res.latest.get("option_symbol")
                             if opt_sym:
@@ -1422,10 +1426,28 @@ class ScannerEngine:
                 elif state in ("ACTIVE", "PENDING"):
                     display_dir = "BUY" if active_dir == "LONG" else "SELL" if active_dir == "SHORT" else ""
                 else:
-                    continue  # FLAT with no signal – skip
+                    # Dashboard is empty on weekends because the last bar is FLAT.
+                    # Look back up to 72 hours for the most recent signal to display.
+                    display_dir = ""
+                    ms = get_market_status()
+                    is_closed = not ms.get("market_open", False) or ms.get("session_status") != "OPEN"
+                    if is_closed and not result.frame.empty and "signal" in result.frame.columns:
+                        recent = result.frame[result.frame["signal"].isin(["BUY", "SELL"])]
+                        if not recent.empty:
+                            last_sig_time = pd.Timestamp(recent.index[-1])
+                            now = datetime.now(IST_TZ)
+                            now_naive = now.replace(tzinfo=None)
+                            last_sig_naive = last_sig_time.tz_localize(None) if last_sig_time.tz is not None else last_sig_time
+                            if (now_naive - last_sig_naive) < pd.Timedelta(hours=72):
+                                past_sig = str(recent.iloc[-1]["signal"])
+                                display_dir = past_sig
+                                # Temporarily use the past signal's data for the UI
+                                lt = recent.iloc[-1].to_dict()
+                                sig = past_sig
+                                past_sig_time = last_sig_time
 
-                if not display_dir:
-                    continue
+                    if not display_dir:
+                        continue
 
                 if dir_upper and display_dir != dir_upper:
                     continue
@@ -1507,6 +1529,7 @@ class ScannerEngine:
                     "option_strike": _safe(lt.get("option_strike")),
                     "option_symbol": str(lt.get("option_symbol", "")),
                     "option_entry": _safe(lt.get("option_entry")),
+                    "option_ltp": _safe(lt.get("option_ltp")),
                     "option_sl1": _safe(lt.get("option_sl1")),
                     "option_sl2": _safe(lt.get("option_sl2")),
                     "option_tsl": _safe(lt.get("option_tsl")),
@@ -1577,19 +1600,23 @@ class ScannerEngine:
                     except Exception:
                         pass
 
+        # Convert stock-scale pnl sums to portfolio-scale (assuming equal sizing 1/N)
+        port_realized = realized_today / max_open if max_open > 0 else realized_today
+        port_open = open_drawdown / max_open if max_open > 0 else open_drawdown
+
         reasons = []
-        if realized_today <= -daily_max:
-            reasons.append(f"today's realized loss {realized_today:.2f}% <= -{daily_max:.2f}%")
-        if open_drawdown <= -daily_max:
-            reasons.append(f"open drawdown {open_drawdown:.2f}% <= -{daily_max:.2f}%")
+        if port_realized <= -daily_max:
+            reasons.append(f"today's realized loss {port_realized:.2f}% <= -{daily_max:.2f}%")
+        if port_open <= -daily_max:
+            reasons.append(f"open drawdown {port_open:.2f}% <= -{daily_max:.2f}%")
         book_full = active_count >= max_open
         return {
             "paused": bool(reasons),
             "book_full": book_full,
             "active_count": active_count,
             "max_open_positions": max_open,
-            "open_drawdown_pct": round(open_drawdown, 2),
-            "realized_today_pct": round(realized_today, 2),
+            "open_drawdown_pct": round(port_open, 2),
+            "realized_today_pct": round(port_realized, 2),
             "reasons": reasons,
         }
 
@@ -1613,13 +1640,22 @@ class ScannerEngine:
 
         slots = max(0, max_open - circuit["active_count"])
         selected = 0
+        # RX-03 FIX: Seed per_sector with existing ACTIVE trades so that the
+        # sector cap is enforced against the *full* portfolio, not just new
+        # candidates. Without this, 2 active BANK trades + a new BANK candidate
+        # would pass the cap because per_sector started at 0.
         per_sector: dict[str, int] = {}
+        for sig in signals:
+            if sig.get("state") == "ACTIVE":
+                sec = str(sig.get("sector", ""))
+                per_sector[sec] = per_sector.get(sec, 0) + 1
         if not circuit["paused"]:
             for sig in candidates:
                 if selected >= slots:
                     break
                 sec = str(sig.get("sector", ""))
-                if per_sector.get(sec, 0) >= max_per_sector:
+                # Skip sector cap for the generic NSE bucket so it doesn't starve 52% of the market
+                if sec and sec != "NSE" and per_sector.get(sec, 0) >= max_per_sector:
                     continue
                 sig["selected"] = True
                 selected += 1
@@ -1741,6 +1777,14 @@ class ScannerEngine:
                         "regime_1h": str(lt.get("regime_1h", "")),
                         "regime_4h": str(lt.get("regime_4h", "")),
                         "regime_1d": str(lt.get("regime_1d", "")),
+                        "option_type": str(lt.get("option_type", "")),
+                        "option_strike": _safe(lt.get("option_strike")),
+                        "option_symbol": str(lt.get("option_symbol", "")),
+                        "option_entry": _safe(lt.get("option_entry")),
+                        "option_ltp": _safe(lt.get("option_ltp")),
+                        "option_sl1": _safe(lt.get("option_sl1")),
+                        "option_tsl": _safe(lt.get("option_tsl")),
+                        "option_tp1": _safe(lt.get("option_tp1")),
                     })
                 elif result.pending_order:
                     po = result.pending_order
@@ -1843,6 +1887,11 @@ class ScannerEngine:
                     "regime_1h": str(lt.get("regime_1h", "")),
                     "regime_4h": str(lt.get("regime_4h", "")),
                     "regime_1d": str(lt.get("regime_1d", "")),
+                    "option_type": str(lt.get("option_type", "")),
+                    "option_strike": _safe(lt.get("option_strike")),
+                    "option_symbol": str(lt.get("option_symbol", "")),
+                    "option_entry": _safe(lt.get("option_entry")),
+                    "option_ltp": _safe(lt.get("option_ltp")),
                     "intraday_or_swing": _trade_type(tf, lt.get("timestamp"), board_dir, _EXPECTED_DURATION_HRS[tf]),
                     "daily_move_pct": _daily_move_pct(result),
                 })
@@ -2321,16 +2370,20 @@ class ScannerEngine:
             t2h = bool(at.t2_hit)
             t3h = bool(at.t3_hit)
             stp = str(at.setup) if hasattr(at, "setup") else ""
+            def _opt_val(key):
+                val = _safe(getattr(at, key, None))
+                return val if val is not None else _safe(lt.get(key))
+
             o_type = str(getattr(at, "option_type", "") or lt.get("option_type", ""))
-            o_strike = _safe(getattr(at, "option_strike", None) or lt.get("option_strike"))
+            o_strike = _opt_val("option_strike")
             o_sym = str(getattr(at, "option_symbol", "") or lt.get("option_symbol", ""))
-            o_entry = _safe(getattr(at, "option_entry", None) or lt.get("option_entry"))
-            o_sl1 = _safe(getattr(at, "option_sl1", None) or lt.get("option_sl1"))
-            o_sl2 = _safe(getattr(at, "option_sl2", None) or lt.get("option_sl2"))
-            o_tsl = _safe(getattr(at, "option_tsl", None) or lt.get("option_tsl"))
-            o_tp1 = _safe(getattr(at, "option_tp1", None) or lt.get("option_tp1"))
-            o_tp2 = _safe(getattr(at, "option_tp2", None) or lt.get("option_tp2"))
-            o_tp3 = _safe(getattr(at, "option_tp3", None) or lt.get("option_tp3"))
+            o_entry = _opt_val("option_entry")
+            o_sl1 = _opt_val("option_sl1")
+            o_sl2 = _opt_val("option_sl2")
+            o_tsl = _opt_val("option_tsl")
+            o_tp1 = _opt_val("option_tp1")
+            o_tp2 = _opt_val("option_tp2")
+            o_tp3 = _opt_val("option_tp3")
         else:
             raw_dir = str(lt.get("active_direction") or lt.get("signal", ""))
             display_dir = "BUY" if raw_dir in ("LONG", "BUY") else ("SELL" if raw_dir in ("SHORT", "SELL") else "")
@@ -2408,17 +2461,18 @@ class ScannerEngine:
                 return cached[1]
 
         frame = result.frame
+        is_daily = timeframe == "1d"
         candles: list[dict] = []
         for ts, row in frame.iterrows():
             try:
-                epoch = _epoch_ist(ts)
                 o  = _safe(row.get("open"))
                 h  = _safe(row.get("high"))
                 lo = _safe(row.get("low"))
                 c  = _safe(row.get("close"))
                 v  = _safe(row.get("volume")) or 0.0
                 if o and h and lo and c:
-                    candles.append({"time": epoch, "open": o, "high": h, "low": lo, "close": c, "volume": v})
+                    time_val = _epoch_ist(ts)
+                    candles.append({"time": time_val, "open": o, "high": h, "low": lo, "close": c, "volume": v})
             except Exception:
                 pass
 

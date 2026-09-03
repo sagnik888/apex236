@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NSE F&O Screener</title>
+<style>
+:root{font-family:Inter,Segoe UI,Arial,sans-serif;background:#07101c;color:#eaf1fb;color-scheme:dark;--panel:#09131f;--line:#1a2b3e;--muted:#7890aa;--bull:#64e6a7;--bear:#ff7f8d;--neutral:#aab7c6}*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#12304c 0,#07101c 34%,#050a12 100%);min-height:100vh}.wrap{max-width:1880px;margin:auto;padding:22px}.top{display:flex;gap:14px;justify-content:space-between;align-items:center;flex-wrap:wrap}.title{font-size:26px;font-weight:800;letter-spacing:-.5px}.sub{color:#8da2ba;font-size:13px;margin-top:4px}.status{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.badge,.btn,.tf{border:1px solid #23364d;background:#0c1828;border-radius:10px;padding:9px 12px;font-size:12px}.badge.live{color:#61e9a9;border-color:#1d6648}.badge.warn{color:#ffd369;border-color:#6a5822}.btn{cursor:pointer;background:#18395d;color:#fff;font-weight:700}.btn:hover{background:#24517e}.btn:disabled{opacity:.55;cursor:wait}.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:20px 0}.tf{cursor:pointer;color:#9db2ca}.tf.active{background:#1d4f7a;color:#fff;border-color:#397eb8}.cards{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:16px}.card{background:#0a1421;border:1px solid #1b2b3e;border-radius:13px;padding:14px}.k{color:#7890aa;font-size:11px;text-transform:uppercase;letter-spacing:.08em}.v{font-size:20px;font-weight:800;margin-top:5px}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;margin-top:14px}.panel.bullPanel{box-shadow:inset 3px 0 0 rgba(100,230,167,.8)}.panel.bearPanel{box-shadow:inset 3px 0 0 rgba(255,127,141,.8)}.panelHead{display:flex;justify-content:space-between;align-items:center;padding:14px 16px;border-bottom:1px solid var(--line);gap:14px}.panelHead b{font-size:14px}.panelHead .left{display:flex;align-items:center;gap:9px}.count{min-width:28px;text-align:center;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:800;background:#0f2235}.bullPanel .count{color:var(--bull)}.bearPanel .count{color:var(--bear)}.tableWrap{overflow:auto;max-height:48vh}table{width:100%;border-collapse:separate;border-spacing:0;min-width:1950px}th{position:sticky;top:0;z-index:4;background:#0d1b2a;color:#7890aa;font-size:10px;text-transform:uppercase;letter-spacing:.055em;text-align:right;padding:10px 8px;border-bottom:1px solid #1c3147}th:first-child,td:first-child{text-align:left;position:sticky;left:0}th:first-child{z-index:6;background:#0d1b2a}td:first-child{z-index:2;background:#09131f}tr:hover td{background:#0d1b2b}tr:hover td:first-child{background:#0d1b2b}td{padding:9px 8px;border-bottom:1px solid #122235;text-align:right;font-size:12px;white-space:nowrap}.sym{font-weight:800;font-size:13px}.name{display:block;color:#6f849c;font-weight:400;font-size:10px;margin-top:2px}.bull{color:var(--bull)}.bear{color:var(--bear)}.neutral{color:var(--neutral)}.dir{display:inline-flex;align-items:center;gap:4px;font-weight:800}.dir .arr{font-size:11px}.tfState{display:inline-flex;flex-direction:column;align-items:flex-end;line-height:1.06;min-width:63px}.tfState strong{font-size:11px}.tfState small{font-size:9px;color:#6e839b;margin-top:3px}.tfHead{background:#102337}.tfHead.selected{background:#174366;color:#cde9ff}.fresh{font-weight:700}.fresh.STALE,.fresh.OFFLINE{color:var(--bear)}.fresh.DELAYED{color:#ffd369}.fresh.LIVE{color:var(--bull)}.reason{color:#8fa3ba;max-width:280px;overflow:hidden;text-overflow:ellipsis;text-align:left}.empty{padding:30px!important;color:#8094aa;text-align:center!important;position:static!important}.warnBox{margin:12px 0;padding:10px 12px;border-radius:9px;background:#2b2311;border:1px solid #645223;color:#f4cf70;font-size:12px}.legend{display:flex;gap:14px;flex-wrap:wrap;color:#71869e;font-size:11px;margin:-5px 0 10px}.legend .bull,.legend .bear{font-weight:800}.muted{color:#60758c}.matrixAge{color:#61778f;font-size:10px;margin-left:5px}@media(max-width:900px){.cards{grid-template-columns:repeat(2,1fr)}.wrap{padding:12px}.tableWrap{max-height:54vh}}
+</style>
+</head>
+<body><div class="wrap">
+<div class="top">
+  <div><div class="title">NSE F&O Multi-Timeframe Screener</div><div class="sub">15s quote pulse • ≤55s micro scans • split bullish/bearish boards • closed-bar MTF signals • IST timestamps</div></div>
+  <div class="status"><span id="market" class="badge">MARKET —</span><span id="source" class="badge">SOURCE —</span><button id="refresh" class="btn">Refresh Now</button></div>
+</div>
+<div class="tabs" id="tabs"></div><div id="warning"></div>
+<div class="cards">
+  <div class="card"><div class="k">Universe</div><div id="universe" class="v">—</div></div>
+  <div class="card"><div class="k">Scored</div><div id="scored" class="v">—</div></div>
+  <div class="card"><div class="k">Bullish</div><div id="bulls" class="v bull">—</div></div>
+  <div class="card"><div class="k">Bearish</div><div id="bears" class="v bear">—</div></div>
+  <div class="card"><div class="k">Last Scan / Quote</div><div id="age" class="v" style="font-size:13px">—</div></div>
+</div>
+<div class="legend"><span class="bull">▲ BUY / bullish</span><span class="bear">▼ SELL / bearish</span><span>→ WAIT / neutral</span><span>5m → 4h cells are independent signals and refresh on their own scan lanes.</span></div>
+
+<div class="panel bullPanel">
+  <div class="panelHead"><div class="left"><b id="bullHeading">Bullish Signals</b><span id="bullCount" class="count">0</span></div><span class="sub" id="bullMeta"></span></div>
+  <div class="tableWrap"><table><thead><tr>
+    <th>Symbol</th><th>Price</th><th>Score</th><th>Signal</th>
+    <th class="tfHead" data-mtf="5min">5m</th><th class="tfHead" data-mtf="15min">15m</th><th class="tfHead" data-mtf="30min">30m</th><th class="tfHead" data-mtf="1h">1h</th><th class="tfHead" data-mtf="4h">4h</th>
+    <th>1D%</th><th>2D%</th><th>4D%</th><th>7D%</th><th>30D%</th><th>RSI</th><th>ADX</th><th>RVOL</th><th>Freshness</th><th>Bar time</th><th style="text-align:left">Why</th>
+  </tr></thead><tbody id="bullBody"></tbody></table></div>
+</div>
+
+<div class="panel bearPanel">
+  <div class="panelHead"><div class="left"><b id="bearHeading">Bearish Signals</b><span id="bearCount" class="count">0</span></div><span class="sub" id="bearMeta"></span></div>
+  <div class="tableWrap"><table><thead><tr>
+    <th>Symbol</th><th>Price</th><th>Score</th><th>Signal</th>
+    <th class="tfHead" data-mtf="5min">5m</th><th class="tfHead" data-mtf="15min">15m</th><th class="tfHead" data-mtf="30min">30m</th><th class="tfHead" data-mtf="1h">1h</th><th class="tfHead" data-mtf="4h">4h</th>
+    <th>1D%</th><th>2D%</th><th>4D%</th><th>7D%</th><th>30D%</th><th>RSI</th><th>ADX</th><th>RVOL</th><th>Freshness</th><th>Bar time</th><th style="text-align:left">Why</th>
+  </tr></thead><tbody id="bearBody"></tbody></table></div>
+</div>
+</div>
+<script>
+const tfs=['5min','15min','30min','1h','4h','1d','2d','4d','1w'];
+const mtfs=['5min','15min','30min','1h','4h'];
+let tf='5min', data={}, matrix={timeframes:mtfs,states:{},generated_at:{}};
+let matrixTimer=null;
+const tabs=document.getElementById('tabs');
+tfs.forEach(x=>{const b=document.createElement('button');b.className='tf'+(x===tf?' active':'');b.textContent=x;b.onclick=()=>{tf=x;[...tabs.children].forEach(e=>e.classList.toggle('active',e.textContent===x));highlightSelectedTf();load();};tabs.appendChild(b)});
+const fmt=(x,d=2)=>x==null||Number.isNaN(Number(x))?'—':Number(x).toFixed(d);
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function side(score){const n=Number(score);return n>0?'bull':n<0?'bear':'neutral'}
+function arrowFor(score){const n=Number(score);return n>0?'▲':n<0?'▼':'→'}
+function signalText(score,label){const l=String(label||'').toLowerCase();if(l.includes('bull'))return 'BUY';if(l.includes('bear'))return 'SELL';return 'WAIT'}
+function directionCell(value, score, suffix='', digits=1){const cls=side(score);return `<span class="dir ${cls}"><span class="arr">${arrowFor(score)}</span>${fmt(value,digits)}${suffix}</span>`}
+function pctCell(v){if(v==null)return '<span class="muted">—</span>';return directionCell(v,v,'%',2)}
+function priceCell(r){const d=r.pct_change_1d==null?r.score:r.pct_change_1d;return `<span class="dir ${side(d)}"><span class="arr">${arrowFor(d)}</span>₹${fmt(r.last_price,2)}</span>`}
+function signalCell(r){return `<span class="dir ${side(r.score)}"><span class="arr">${arrowFor(r.score)}</span>${signalText(r.score,r.label)}</span>`}
+function mtfCell(symbol, mtf){const s=(matrix.states?.[mtf]||{})[symbol];if(!s)return '<span class="muted">—</span>';const cls=side(s.score),txt=signalText(s.score,s.label);const title=`${mtf}: ${s.label||'Neutral'} • score ${fmt(s.score,1)} • ${s.freshness||'—'}`;return `<span class="tfState ${cls}" title="${esc(title)}"><strong>${arrowFor(s.score)} ${txt}</strong><small>${Number(s.score)>0?'+':''}${fmt(s.score,1)}</small></span>`}
+function strengthCell(v,r,kind){if(v==null)return '<span class="muted">—</span>';let dir=r.score;if(kind==='rsi')dir=Number(v)-50;return directionCell(v,dir,kind==='rvol'?'x':'',kind==='rvol'?2:1)}
+function row(r){const cls=side(r.score);const why=(r.reasons||[]).join(' • ');return `<tr>
+<td><span class="sym ${cls}">${arrowFor(r.score)} ${esc(r.symbol)}</span><span class="name">${esc(r.name)}</span></td>
+<td>${priceCell(r)}</td><td>${directionCell(r.score,r.score,'',1)}</td><td>${signalCell(r)}</td>
+${mtfs.map(x=>`<td>${mtfCell(r.symbol,x)}</td>`).join('')}
+<td>${pctCell(r.pct_change_1d)}</td><td>${pctCell(r.pct_change_2d)}</td><td>${pctCell(r.pct_change_4d)}</td><td>${pctCell(r.pct_change_7d)}</td><td>${pctCell(r.pct_change_30d)}</td>
+<td>${strengthCell(r.rsi,r,'rsi')}</td><td>${strengthCell(r.adx,r,'adx')}</td><td>${strengthCell(r.rvol,r,'rvol')}</td>
+<td class="fresh ${esc(r.freshness)}">${esc(r.freshness)}</td><td>${esc((r.last_bar_time||'').replace('+05:30',' IST'))}</td><td class="reason" title="${esc(why)}">${esc(why)}</td></tr>`}
+function highlightSelectedTf(){document.querySelectorAll('[data-mtf]').forEach(el=>el.classList.toggle('selected',el.dataset.mtf===tf))}
+function setEmpty(id,text){document.getElementById(id).innerHTML=`<tr><td colspan="20" class="empty">${esc(text)}</td></tr>`}
+function render(d){highlightSelectedTf();if(!d||d.status==='not_yet_computed'){setEmpty('bullBody','Computing first scan…');setEmpty('bearBody','Computing first scan…');return}if(d.status==='error'){setEmpty('bullBody',d.error||'Scan error');setEmpty('bearBody',d.error||'Scan error');return}
+document.getElementById('market').textContent='MARKET '+(d.market_status||'—');document.getElementById('market').className='badge '+(d.market_status==='LIVE'?'live':'');document.getElementById('source').textContent=(d.source_freshness||d.data_source||'—');document.getElementById('source').className='badge '+((d.source_freshness||'').includes('LIVE')?'live':'warn');
+['universe','scored','bulls','bears'].forEach((id,i)=>document.getElementById(id).textContent=[d.universe_count,d.scored_count,d.bullish?.length,d.bearish?.length][i]??'—');
+const scan=d.generated_at?new Date(d.generated_at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'}):'—';const qt=d.quote_refreshed_at?new Date(d.quote_refreshed_at).toLocaleTimeString('en-IN',{timeZone:'Asia/Kolkata'}):'—';document.getElementById('age').textContent=`Scan ${scan} • Quote ${qt}`;document.getElementById('warning').innerHTML=d.warning?`<div class="warnBox">${esc(d.warning)}</div>`:'';
+const bulls=d.bullish||[],bears=d.bearish||[];document.getElementById('bullBody').innerHTML=bulls.length?bulls.map(row).join(''):'<tr><td colspan="20" class="empty">No bullish signals at this threshold.</td></tr>';document.getElementById('bearBody').innerHTML=bears.length?bears.map(row).join(''):'<tr><td colspan="20" class="empty">No bearish signals at this threshold.</td></tr>';
+document.getElementById('bullCount').textContent=bulls.length;document.getElementById('bearCount').textContent=bears.length;document.getElementById('bullHeading').textContent=`${tf} Bullish Signals`;document.getElementById('bearHeading').textContent=`${tf} Bearish Signals`;const meta=`${d.refresh_class||'scan'} lane • ${d.scored_count||0} scored • ${d.failed_count||0} unavailable • ${d.scan_duration_seconds||0}s compute`;document.getElementById('bullMeta').textContent=meta;document.getElementById('bearMeta').textContent=meta;}
+async function loadMatrix(){try{const r=await fetch('/api/intraday-matrix',{cache:'no-store'});if(r.ok)matrix=await r.json();}catch(e){}}
+async function load(){try{const [r]=await Promise.all([fetch('/api/scan/'+tf,{cache:'no-store'}),loadMatrix()]);data[tf]=await r.json();render(data[tf]);}catch(e){}}
+function scheduleMatrixRefresh(){clearTimeout(matrixTimer);matrixTimer=setTimeout(async()=>{await loadMatrix();if(data[tf])render(data[tf]);},180)}
+document.getElementById('refresh').onclick=async()=>{const b=document.getElementById('refresh');b.disabled=true;b.textContent='Refreshing…';try{await fetch('/api/refresh/'+tf,{method:'POST'});}finally{setTimeout(async()=>{await load();b.disabled=false;b.textContent='Refresh Now'},2500)}};
+load();setInterval(load,12000);
+let ws,pingTimer;function connect(){ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws/scan');ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.type==='snapshot'){data=m.data||{};scheduleMatrixRefresh();if(data[tf])render(data[tf]);}else if(m.type==='update'){const previous=data[m.timeframe]?.generated_at;data[m.timeframe]=m.data;if(mtfs.includes(m.timeframe)&&m.data?.generated_at&&m.data.generated_at!==matrix.generated_at?.[m.timeframe]&&m.data.generated_at!==previous)scheduleMatrixRefresh();if(m.timeframe===tf)render(m.data)}};ws.onclose=()=>{clearInterval(pingTimer);setTimeout(connect,2500)};ws.onopen=()=>{clearInterval(pingTimer);pingTimer=setInterval(()=>{try{ws.send('ping')}catch(e){}},20000)}}connect();
+</script></body></html>

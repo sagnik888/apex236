@@ -19,6 +19,7 @@ from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
 
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from scanner_engine import ScannerEngine, get_market_status, scan_interval_secs, ist_now
 from nifty50 import TIMEFRAMES
@@ -106,7 +107,7 @@ async def _bg_scan_loop() -> None:
         try:
             await asyncio.wait_for(
                 loop.run_in_executor(scanner_pool, engine.run_all_scans, ["15m", "1h", "4h", "1d"]),
-                timeout=360.0,
+                timeout=600.0,
             )
             stats = engine.get_stats()
             await _push_to_all_clients({"type": "scan_complete", "stats": stats})
@@ -246,8 +247,8 @@ if os.getenv("ALLOWED_ORIGINS"):
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
+    allow_origins=["*"], # Allow all origins for the local dashboard to function properly when accessed via IP
+    allow_credentials=True if not ["*"] else False, # Credentials cannot be true if origins is *
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -292,11 +293,7 @@ def _check_csrf(request: Request) -> None:
             detail="Content-Type must be application/json",
         )
     origin = request.headers.get("origin")
-    if origin and origin not in allowed_origins:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Cross-origin write rejected",
-        )
+    # Removed strict origin check to allow access via local network IPs
 
 
 def _validate_timeframe(timeframe: Optional[str]) -> Optional[JSONResponse]:
@@ -308,6 +305,82 @@ def _validate_timeframe(timeframe: Optional[str]) -> Optional[JSONResponse]:
         )
     return None
 
+
+@app.get("/api/quotes/bulk")
+def get_quotes_bulk(keys: str = Query(..., description="Comma separated instrument keys")):
+    from upstox_feed import get_upstox_feed
+    feed = get_upstox_feed()
+    out = {}
+    for k in keys.split(","):
+        k = k.strip()
+        if not k:
+            continue
+        c = feed.get_forming_candle(k)
+        if c:
+            out[k] = {
+                "last_price": c.get("close", 0.0),
+                "last_trade_time": int(c.get("start_time").timestamp() * 1000) if c.get("start_time") else 0
+            }
+        else:
+            # check angel feed if upstox is missing
+            pass # we'll stick to upstox for now
+    return {"data": out}
+
+@app.get("/api/historical/{symbol}/{timeframe}")
+def get_historical_cache(symbol: str, timeframe: str):
+    from data_provider import fetch_ohlcv
+    try:
+        df = fetch_ohlcv(symbol, timeframe)
+        if df is not None and not df.empty:
+            df = df.reset_index()
+            time_col = df.columns[0]
+            df[time_col] = df[time_col].astype(str)
+            return {"data": df.to_dict(orient="records")}
+        return {"error": "No data returned from broker or cache"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/historical_bulk/{timeframe}")
+def get_historical_bulk(timeframe: str, symbols: str = Query(..., description="Comma separated symbols")):
+    from broker_dispatcher import get_dispatcher
+    from data_provider import _angel_fetch, _load_pickle_if_fresh, _angel_enabled
+    import concurrent.futures
+    
+    dispatcher = get_dispatcher()
+    out = {}
+    
+    def _fetch_one(sym: str):
+        sym = sym.strip()
+        if not sym:
+            return None
+        try:
+            df = None
+            if timeframe in ("15m", "1h", "4h", "1d"):
+                if timeframe != "1d" and _angel_enabled():
+                    df = _angel_fetch(sym, timeframe)
+                if df is None or df.empty:
+                    df = _load_pickle_if_fresh(sym, timeframe)
+            
+            if df is None or df.empty:
+                df, _ = dispatcher.fetch_ohlcv(sym, timeframe)
+
+            if df is not None and not df.empty:
+                df = df.reset_index()
+                time_col = df.columns[0]
+                df[time_col] = df[time_col].astype(str)
+                return sym, df.to_dict(orient="records")
+        except Exception:
+            pass
+        return None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
+        futures = [executor.submit(_fetch_one, sym) for sym in symbols.split(",")]
+        for future in concurrent.futures.as_completed(futures):
+            result = future.result()
+            if result:
+                out[result[0]] = result[1]
+
+    return {"data": out}
 
 @app.get("/api/healthz")
 @limiter.limit("60/minute")
@@ -437,6 +510,38 @@ def get_symbols(request: Request):
     return engine.get_symbols()
 
 
+@app.get("/api/backtest/data-range")
+@limiter.limit("10/minute")
+def backtest_data_range(request: Request):
+    from backtest_api import get_data_range
+    return get_data_range()
+
+
+@app.post("/api/backtest")
+@limiter.limit("5/minute")
+async def run_backtest_endpoint(request: Request):
+    from backtest_api import run_backtest
+    body = await request.json()
+    result = await asyncio.get_event_loop().run_in_executor(
+        scanner_pool,
+        lambda: run_backtest(
+            symbol=body.get("symbol"),
+            timeframe=body.get("timeframe", "15m"),
+            days=body.get("days", 60),
+            min_score=body.get("min_score", 60.0),
+            conflict_margin=body.get("conflict_margin", 10.0),
+            atr_mult=body.get("atr_mult", 2.0),
+            fixed_sl_pct=body.get("fixed_sl_pct", 0.0),
+            fixed_tp_pct=body.get("fixed_tp_pct", 0.0),
+            force_fixed_sl=body.get("force_fixed_sl", False),
+            exit_at_t1=body.get("exit_at_t1", False),
+            slippage_pct=body.get("slippage_pct", 0.05),
+            cost_pct=body.get("cost_pct", 0.182),
+            include_options=body.get("include_options", False),
+        )
+    )
+    return result
+
 @app.get("/api/settings", dependencies=[Depends(_check_auth)])
 @limiter.limit("30/minute")
 def get_settings_endpoint(request: Request):
@@ -471,7 +576,7 @@ def get_history(request: Request, limit: int = Query(300, ge=1, le=1000), symbol
     return engine.get_history(limit=limit, symbol=symbol, timeframe=timeframe)
 
 
-@app.post("/api/scan", dependencies=[Depends(_check_auth), Depends(_check_csrf)])
+@app.post("/api/scan", dependencies=[Depends(_check_auth)])
 @limiter.limit("5/minute")
 async def trigger_scan(request: Request):
     """Trigger a fresh scan asynchronously (honest about overlap skips)."""
@@ -733,8 +838,9 @@ def get_options_chain_endpoint(
     expiry: Optional[str] = Query(None, description="Expiry date YYYY-MM-DD")
 ):
     from data_provider import fetch_options_chain
-    chain = fetch_options_chain(symbol, expiry)
-    return {"symbol": symbol, "chain": chain}
+    result = fetch_options_chain(symbol, expiry)
+    result["symbol"] = symbol
+    return result
 
 @app.get("/api/options/greeks")
 @limiter.limit("60/minute")

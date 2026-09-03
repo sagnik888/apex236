@@ -19,12 +19,12 @@ interface OrderEvent {
 export default function OrderBook() {
   const { data, isLoading, isError, refetch, isFetching } = useQuery({
     queryKey: ["/api/orders/book"],
-    queryFn: () => customFetch<{ orders: OrderEvent[] }>("/api/orders/book"),
+    queryFn: () => customFetch<{ intents: OrderEvent[], fills: OrderEvent[] }>("/api/orders/book"),
     refetchInterval: 5000,
     retry: false
   });
 
-  const orders = data?.orders || [];
+  const orders = [...(data?.intents || []), ...(data?.fills || [])].sort((a, b) => new Date(b.time).getTime() - new Date(a.time).getTime());
 
   const getStatusBadge = (status: string) => {
     switch (status.toUpperCase()) {
