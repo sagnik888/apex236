@@ -1,0 +1,5 @@
+with open('artifacts/api-server/python_scanner/sectors.py', 'r') as f: content = f.read()
+new_sec = '''    if s in ('BHARTIARTL', 'IDEA', 'INDUSTOWER', 'TATACOMM'): return 'TELECOM'\n    if s in ('ASIANPAINT', 'BERGEPAINT', 'KANSAINER', 'PIDILITIND', 'SRF', 'AARTIIND', 'DEEPAKNTR', 'NAVINFLUOR', 'PIIND', 'TATACHEM', 'UPL', 'COROMANDEL'): return 'CHEMICALS'\n    if s in ('APOLLOHOSP', 'MAXHEALTH', 'FORTIS', 'METROPOLIS', 'LALPATHLAB', 'SYNGENE'): return 'HEALTHCARE'\n    if s in ('INDIGO', 'IRCTC', 'CONCOR', 'MOTHERSON', 'BOSCHLTD', 'MRF', 'APOLLOTYRE', 'CEATLTD', 'BALKRISIND'): return 'LOGISTICS_AUTOANC'\n    if s in ('PAGEIND', 'BATAINDIA', 'RELAXO', 'VOLTAS', 'HAVELLS', 'CROMPTON', 'DIXON', 'POLYCAB', 'KEI', 'AMBER', 'WHIRLPOOL'): return 'CONSUMER_DURABLES'\n    if s in ('MCX', 'IEX', 'BSE', 'CDSL', 'CAMS', 'KFINTECH', 'UTIAMC', 'NAM-INDIA', 'HDFCAMC'): return 'CAPITAL_MARKETS'\n    return 'OTHER_EQUITY'\n'''
+content = content.replace('    return \
+NSE\', new_sec)
+with open('artifacts/api-server/python_scanner/sectors.py', 'w') as f: f.write(content)

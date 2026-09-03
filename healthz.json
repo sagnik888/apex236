@@ -1,0 +1,60 @@
+{
+  "status": "ok",
+  "problems": [],
+  "version": "2.1.0",
+  "scanning": true,
+  "last_scan": null,
+  "data_health": {
+    "source_mode": "auto",
+    "angel_active": true,
+    "bootstrap": {
+      "15m": "running",
+      "1h": "idle"
+    },
+    "heal_queue": 0,
+    "symbols_cached_15m": 93,
+    "source_by_symbol_yahoo": 0,
+    "feed": {
+      "connected": true,
+      "tokens": 236,
+      "packets": 12158,
+      "symbols_with_ticks": 236,
+      "last_packet_age_s": 0.13560149999102578
+    },
+    "dispatcher": {
+      "equity_provider": "angel",
+      "options_provider": "upstox",
+      "options_available": true,
+      "options_status": "OK",
+      "upstox_auth": {
+        "broker": "upstox",
+        "connected": true,
+        "auth_required": false,
+        "reason": "",
+        "user_id": "",
+        "token_updated_at": "2026-09-03T04:48:44.575104+05:30",
+        "expires_at": "2026-09-04T03:30:00+05:30",
+        "seconds_remaining": 63876,
+        "hours_remaining": 17.7,
+        "expiring_soon": false,
+        "daily_cutoff_ist": "03:30",
+        "missing_credentials": []
+      },
+      "balance_mode": "split",
+      "equity_broker": "split",
+      "options_broker": "upstox",
+      "angel_credentials": true,
+      "upstox_credentials": true,
+      "upstox_authenticated": true,
+      "angel_available": true,
+      "upstox_available": true,
+      "upstox_status": "OK",
+      "angel_failures": 0,
+      "upstox_failures": 0,
+      "total_symbols_managed": 236,
+      "angel_assigned_count": 236,
+      "upstox_assigned_count": 0,
+      "split_ratio": "Equity: AngelOne (236) | Options: Upstox"
+    }
+  }
+}

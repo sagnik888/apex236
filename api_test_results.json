@@ -1,0 +1,128 @@
+[
+  {
+    "endpoint": "/api/healthz",
+    "status": 200,
+    "success": true,
+    "time_ms": 5.853176116943359
+  },
+  {
+    "endpoint": "/api/session",
+    "status": 200,
+    "success": true,
+    "time_ms": 15.439510345458984
+  },
+  {
+    "endpoint": "/api/signals?timeframe=15m",
+    "status": 200,
+    "success": true,
+    "time_ms": 15.74563980102539
+  },
+  {
+    "endpoint": "/api/trades",
+    "status": 200,
+    "success": true,
+    "time_ms": 2.652883529663086
+  },
+  {
+    "endpoint": "/api/leaderboard",
+    "status": 200,
+    "success": true,
+    "time_ms": 12.753009796142578
+  },
+  {
+    "endpoint": "/api/chart/RELIANCE/15m",
+    "status": 200,
+    "success": true,
+    "time_ms": 17.216920852661133
+  },
+  {
+    "endpoint": "/api/stats",
+    "status": 200,
+    "success": true,
+    "time_ms": 3.2787322998046875
+  },
+  {
+    "endpoint": "/api/analytics",
+    "status": 200,
+    "success": true,
+    "time_ms": 3.1995773315429688
+  },
+  {
+    "endpoint": "/api/symbols",
+    "status": 200,
+    "success": true,
+    "time_ms": 22.64094352722168
+  },
+  {
+    "endpoint": "/api/settings",
+    "status": 200,
+    "success": true,
+    "time_ms": 2.076864242553711
+  },
+  {
+    "endpoint": "/api/history?limit=10",
+    "status": 200,
+    "success": true,
+    "time_ms": 66.15257263183594
+  },
+  {
+    "endpoint": "/api/brokers/status",
+    "status": 200,
+    "success": true,
+    "time_ms": 24.62458610534668
+  },
+  {
+    "endpoint": "/api/auth/upstox",
+    "status": 200,
+    "success": true,
+    "time_ms": 13.649940490722656
+  },
+  {
+    "endpoint": "/api/indices",
+    "status": 200,
+    "success": true,
+    "time_ms": 15.805482864379883
+  },
+  {
+    "endpoint": "/api/oms/positions",
+    "status": 200,
+    "success": true,
+    "time_ms": 17.348766326904297
+  },
+  {
+    "endpoint": "/api/orders/events",
+    "status": 200,
+    "success": true,
+    "time_ms": 14.532804489135742
+  },
+  {
+    "endpoint": "/api/options/resolve?symbol=RELIANCE.NS&spot_price=2950.0&direction=LONG",
+    "status": 200,
+    "success": true,
+    "time_ms": 17.711162567138672
+  },
+  {
+    "endpoint": "/api/options/chain?symbol=RELIANCE",
+    "status": 200,
+    "success": true,
+    "time_ms": 200.38533210754395
+  },
+  {
+    "endpoint": "/api/daybook",
+    "status": 200,
+    "success": true,
+    "time_ms": 85.85047721862793
+  },
+  {
+    "endpoint": "/api/orders/book",
+    "status": 200,
+    "success": true,
+    "time_ms": 21.791458129882812
+  },
+  {
+    "endpoint": "/api/options/expiry",
+    "status": 200,
+    "success": true,
+    "time_ms": 90.0568962097168
+  }
+]
