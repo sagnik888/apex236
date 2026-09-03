@@ -926,10 +926,6 @@ class ScannerEngine:
                         symbol = next(symbol_iterator)
                     except StopIteration:
                         return False
-                    df = fetch_ohlcv(symbol, tf)
-                    if len(df) > 400:
-                        df = df.iloc[-400:].copy()
-                    
                     # Find option_ltp for this symbol if active
                     opt_ltp = math.nan
                     with self._results_lock:
@@ -940,7 +936,16 @@ class ScannerEngine:
                             if opt_sym:
                                 opt_ltp = live_option_ltps.get(opt_sym, math.nan)
 
-                    pending[executor.submit(_scan_preloaded, symbol, tf, df, settings_rev, opt_ltp)] = symbol
+                    def _worker(s=symbol, t=tf, r=settings_rev, l=opt_ltp):
+                        df = fetch_ohlcv(s, t)
+                        if df is None:
+                            logger.debug(f"Skipping {s}/{t} - fetch_ohlcv returned None")
+                            return None
+                        if len(df) > 400:
+                            df = df.iloc[-400:].copy()
+                        return _scan_preloaded(s, t, df, r, l)
+
+                    pending[executor.submit(_worker)] = symbol
                     return True
 
                 while len(pending) < max_pending and submit_next():

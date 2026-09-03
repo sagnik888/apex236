@@ -95,7 +95,7 @@ class MultiBrokerDispatcher:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self.balance_mode = "upstox_primary"  # Changed from split to upstox_primary to utilize fast REST API
+        self.balance_mode = "upstox_primary" # "split", "angel", "upstox_primary"
         self.equity_broker = "split" # "split", "angel", "upstox"
         self.options_broker = "upstox"
         self._angel_failures = 0
@@ -191,6 +191,18 @@ class MultiBrokerDispatcher:
 
         if self.balance_mode == "upstox_primary" and upstox_ok:
             return {"angel": [], "upstox": list(symbols)}
+            
+        if self.balance_mode == "split" and angel_ok and upstox_ok:
+            # Hash split for 50/50 load balancing
+            a_syms = []
+            u_syms = []
+            for sym in symbols:
+                if symbol_slot(sym) == 0:
+                    a_syms.append(sym)
+                else:
+                    u_syms.append(sym)
+            return {"angel": a_syms, "upstox": u_syms}
+
         if angel_ok:
             return {"angel": list(symbols), "upstox": []}
         # Angel down: Upstox equity is now fully capable via 1m resampling

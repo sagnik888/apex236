@@ -59,7 +59,7 @@ function priceCell(r){const d=r.pct_change_1d==null?r.score:r.pct_change_1d;retu
 function signalCell(r){return `<span class="dir ${side(r.score)}"><span class="arr">${arrowFor(r.score)}</span>${signalText(r.score,r.label)}</span>`}
 function mtfCell(symbol, mtf){const s=(matrix.states?.[mtf]||{})[symbol];if(!s)return '<span class="muted">—</span>';const cls=side(s.score),txt=signalText(s.score,s.label);const title=`${mtf}: ${s.label||'Neutral'} • score ${fmt(s.score,1)} • ${s.freshness||'—'}`;return `<span class="tfState ${cls}" title="${esc(title)}"><strong>${arrowFor(s.score)} ${txt}</strong><small>${Number(s.score)>0?'+':''}${fmt(s.score,1)}</small></span>`}
 function strengthCell(v,r,kind){if(v==null)return '<span class="muted">—</span>';let dir=r.score;if(kind==='rsi')dir=Number(v)-50;return directionCell(v,dir,kind==='rvol'?'x':'',kind==='rvol'?2:1)}
-function row(r){const cls=side(r.score);const why=(r.reasons||[]).join(' • ');return `<tr>
+function row(r){const cls=side(r.score);const why=(r.reasons||[]).join(' • ');return `<tr style="cursor:pointer;" onclick="window.parent.postMessage({type:'OPEN_CHART',symbol:'${r.symbol}',timeframe:tf}, '*')">
 <td><span class="sym ${cls}">${arrowFor(r.score)} ${esc(r.symbol)}</span><span class="name">${esc(r.name)}</span></td>
 <td>${priceCell(r)}</td><td>${directionCell(r.score,r.score,'',1)}</td><td>${signalCell(r)}</td>
 ${mtfs.map(x=>`<td>${mtfCell(r.symbol,x)}</td>`).join('')}

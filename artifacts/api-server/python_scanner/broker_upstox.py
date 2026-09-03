@@ -423,12 +423,18 @@ class UpstoxClient:
 
         api_interval = interval
         needs_resample = False
-        if interval in ("5m", "15m", "1h"):
+        if interval in ("5m", "15m"):
             api_interval = "1m"
             needs_resample = True
             # 1minute data can only be fetched for max 30 days at once
             if (to_dt - from_dt).days > 30:
                 from_dt = max(from_dt, to_dt - timedelta(days=30))
+        elif interval in ("1h", "4h"):
+            api_interval = "30minute"
+            needs_resample = True
+            # 30minute data can fetch max 100 days, limit to 90
+            if (to_dt - from_dt).days > 90:
+                from_dt = max(from_dt, to_dt - timedelta(days=90))
 
         upstox_interval = INTERVAL_MAP.get(api_interval, api_interval)
         if api_interval in ("1m", "5m", "15m", "30m"):
@@ -438,6 +444,7 @@ class UpstoxClient:
         from_str = from_dt.astimezone(IST_TZ).strftime("%Y-%m-%d")
 
         url = f"{BASE_URL}/historical-candle/{instrument_key}/{upstox_interval}/{to_str}/{from_str}"
+        candles = []
         for attempt in range(3):
             try:
                 r = self._http.get(url, headers=self._headers(), timeout=20)
@@ -450,49 +457,67 @@ class UpstoxClient:
                 if r.status_code == 429:
                     time.sleep(1.0 * (attempt + 1))
                     continue
-                if not r.ok:
-                    return None
-                data = r.json()
-                if data.get("status") != "success" or not data.get("data", {}).get("candles"):
-                    return pd.DataFrame()
-                candles = data["data"]["candles"]
-                rows = []
-                for c in candles:
-                    try:
-                        ts = datetime.fromisoformat(c[0]).astimezone(IST_TZ)
-                        if ts >= from_dt and ts <= to_dt:
-                            rows.append({
-                                "timestamp": ts,
-                                "open": float(c[1]),
-                                "high": float(c[2]),
-                                "low": float(c[3]),
-                                "close": float(c[4]),
-                                "volume": int(c[5]),
-                            })
-                    except Exception:
-                        continue
-                if not rows:
-                    return pd.DataFrame()
-                df = pd.DataFrame(rows).sort_values("timestamp").set_index("timestamp")
-                df = df[~df.index.duplicated(keep="last")]
+                if r.ok:
+                    data = r.json()
+                    if data.get("status") == "success" and data.get("data", {}).get("candles"):
+                        candles.extend(data["data"]["candles"])
+                break
+            except Exception:
+                time.sleep(1.0)
                 
-                if needs_resample:
-                    rule = "5min" if interval == "5m" else "15min" if interval == "15m" else "60min"
-                    df = df.resample(rule, closed="left", label="left").agg({
-                        "open": "first",
-                        "high": "max",
-                        "low": "min",
-                        "close": "last",
-                        "volume": "sum"
-                    }).dropna()
-                    
-                return df
-            except Exception as exc:
-                if attempt == 2:
-                    logger.debug("Upstox get_candles failed for %s: %s", instrument_key, exc)
-                    return None
-                time.sleep(0.5 * (attempt + 1))
-        return None
+        # Append today's intraday data if the requested range includes today
+        now_ist = datetime.now(IST_TZ)
+        if to_dt.date() >= now_ist.date():
+            intraday_url = f"{BASE_URL}/historical-candle/intraday/{instrument_key}/{upstox_interval}"
+            for attempt in range(3):
+                try:
+                    r = self._http.get(intraday_url, headers=self._headers(), timeout=20)
+                    if r.status_code == 429:
+                        time.sleep(1.0 * (attempt + 1))
+                        continue
+                    if r.ok:
+                        data = r.json()
+                        if data.get("status") == "success" and data.get("data", {}).get("candles"):
+                            candles.extend(data["data"]["candles"])
+                    break
+                except Exception:
+                    time.sleep(1.0)
+
+        rows = []
+        for c in candles:
+            try:
+                ts = datetime.fromisoformat(c[0]).astimezone(IST_TZ)
+                if ts >= from_dt and ts <= to_dt:
+                    rows.append({
+                        "timestamp": ts,
+                        "open": float(c[1]),
+                        "high": float(c[2]),
+                        "low": float(c[3]),
+                        "close": float(c[4]),
+                        "volume": int(c[5]),
+                    })
+            except Exception:
+                continue
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows).sort_values("timestamp").set_index("timestamp")
+        df = df[~df.index.duplicated(keep="last")]
+        
+        if needs_resample:
+            if interval == "5m": rule = "5min"
+            elif interval == "15m": rule = "15min"
+            elif interval == "1h": rule = "60min"
+            elif interval == "4h": rule = "240min"
+            else: rule = "60min"
+            df = df.resample(rule, closed="left", label="left").agg({
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum"
+            }).dropna()
+            
+        return df
 
     def get_quote(self, instrument_keys: list[str]) -> dict[str, dict]:
         """Fetch batched market quote (`/v2/market-quote/quotes`) including option greeks (`delta`, `iv`).

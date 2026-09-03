@@ -557,9 +557,9 @@ def prefetch_all_ohlcv(symbols: list[str], timeframes: list[str]) -> None:
         try:
             angel_syms = splits["angel"]
             if _ensure_tokens(angel_syms):
-                _start_bootstrap(angel_syms, "15m", lookback_days=120)
+                _start_bootstrap(angel_syms, "15m", lookback_days=40)
                 if any(tf in ("1h", "4h") for tf in angel_tfs):
-                    _start_bootstrap(angel_syms, "1h", lookback_days=360)
+                    _start_bootstrap(angel_syms, "1h", lookback_days=100)
                 tokens = [_ANGEL_TOKENS[s]["token"] for s in angel_syms if s in _ANGEL_TOKENS]
                 from angel_feed import get_feed
                 get_feed().start(tokens)

@@ -88,8 +88,9 @@ class YahooFinanceSource(MarketDataSource):
         import asyncio
         from urllib.request import Request, urlopen
         
+        apex_tf = interval.replace("min", "m")
         symbols_str = ",".join(symbol_to_ticker.keys())
-        url = f"http://127.0.0.1:8080/api/historical_bulk/{interval}?symbols={symbols_str}"
+        url = f"http://127.0.0.1:8080/api/historical_bulk/{apex_tf}?symbols={symbols_str}"
         try:
             req = Request(url, headers={"User-Agent": "NSE-FNO-Screener/4.0"})
             
