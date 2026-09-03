@@ -163,6 +163,16 @@ class OrderManager:
     def _open(self, event: dict) -> Optional[dict]:
         from simulation_engine import get_execution_mode, is_live_execution
 
+        timeframe = str(event.get("timeframe", ""))
+
+        # FIX: Phase 1 Time-Gating (Block late entries to prevent EOD square-off bleed)
+        # Only block intraday timeframes (5m, 15m). Allow BTST/Swing (1h, 4h, 1d) to enter anytime.
+        if timeframe in ("5m", "15m"):
+            now_ist = datetime.now(IST_TZ)
+            if now_ist.hour > 14 or (now_ist.hour == 14 and now_ist.minute >= 30):
+                logger.info("OMS: Rejecting %s entry; Intraday time is past 14:30 IST cutoff", self._key(event))
+                return None
+
         key = self._key(event)
         with self._lock:
             if key in self._positions:

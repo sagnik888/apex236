@@ -2329,6 +2329,10 @@ class ApexScanner:
                             current_rr = (float(row["close"]) - active.entry_price) / risk
                             if current_rr >= cfg.trail_start_r:
                                 loose = cfg.trail_mult * (1.5 if bool(row["high_volatility"]) and not active.t2_hit else 1.3 if active.t2_hit else 1.0)
+                                # FIX: Phase 1 TSL Optimization (Tighten TSL before EOD carry-forward)
+                                ts_dt = pd.Timestamp(row["bar_close_time"])
+                                if ts_dt.hour == 14 and ts_dt.minute >= 45 or ts_dt.hour >= 15:
+                                    loose = min(loose, 0.4) # Aggressively tighten ATR multiplier near EOD
                                 active.tsl = max(active.tsl, active.peak_price - float(row["atr"]) * loose)
                                 
                             # FIX EXIT-04: Profit guard now uses ATR-based buffer
@@ -2348,6 +2352,10 @@ class ApexScanner:
                             current_rr = (active.entry_price - float(row["close"])) / risk
                             if current_rr >= cfg.trail_start_r:
                                 loose = cfg.trail_mult * (1.5 if bool(row["high_volatility"]) and not active.t2_hit else 1.3 if active.t2_hit else 1.0)
+                                # FIX: Phase 1 TSL Optimization (Tighten TSL before EOD carry-forward)
+                                ts_dt = pd.Timestamp(row["bar_close_time"])
+                                if ts_dt.hour == 14 and ts_dt.minute >= 45 or ts_dt.hour >= 15:
+                                    loose = min(loose, 0.4) # Aggressively tighten ATR multiplier near EOD
                                 active.tsl = min(active.tsl, active.trough_price + float(row["atr"]) * loose)
                                 
                             # FIX EXIT-04: Profit guard now uses ATR-based buffer (SHORT side)
@@ -2370,6 +2378,10 @@ class ApexScanner:
                                 if current_rr >= cfg.trail_start_r:
                                     opt_risk = abs(active.option_entry - active.option_sl1)
                                     loose = cfg.trail_mult * (1.5 if bool(row["high_volatility"]) and not active.t2_hit else 1.3 if active.t2_hit else 1.0)
+                                    # FIX: Phase 1 TSL Optimization (Tighten TSL before EOD carry-forward)
+                                    ts_dt = pd.Timestamp(row["bar_close_time"])
+                                    if ts_dt.hour == 14 and ts_dt.minute >= 45 or ts_dt.hour >= 15:
+                                        loose = min(loose, 0.4) # Aggressively tighten ATR multiplier near EOD
                                     # We use spot ATR for volatility but translated by delta to option price space
                                     delta = 0.5
                                     opt_loose = float(row["atr"]) * delta * loose

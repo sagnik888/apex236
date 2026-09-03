@@ -61,9 +61,10 @@ class ApexScoreModel:
 
     def fit(self, X: np.ndarray, net_return: np.ndarray, feature_names: Sequence[str], alpha: float = 25.0) -> "ApexScoreModel":
         self.feature_names = list(feature_names)
-        self.xgb_reg = xgb.XGBRegressor(n_estimators=50, max_depth=2, learning_rate=0.05, subsample=0.7, colsample_bytree=0.5, reg_alpha=10.0, reg_lambda=10.0, min_child_weight=30, random_state=42)
+        # FIX: Phase 3 ML Overhaul - Reduced excessive regularization to fix model collapse (Rank IC < 0)
+        self.xgb_reg = xgb.XGBRegressor(n_estimators=100, max_depth=4, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, reg_alpha=1.0, reg_lambda=5.0, min_child_weight=10, random_state=42)
         self.xgb_reg.fit(X, net_return)
-        self.xgb_clf = xgb.XGBClassifier(n_estimators=50, max_depth=2, learning_rate=0.05, subsample=0.7, colsample_bytree=0.5, reg_alpha=10.0, reg_lambda=10.0, min_child_weight=30, random_state=42)
+        self.xgb_clf = xgb.XGBClassifier(n_estimators=100, max_depth=4, learning_rate=0.03, subsample=0.8, colsample_bytree=0.8, reg_alpha=1.0, reg_lambda=5.0, min_child_weight=10, random_state=42)
         self.xgb_clf.fit(X, (net_return > 0).astype(int))
         raw = self.xgb_reg.predict(X)
         self.score_knots = np.percentile(raw, np.linspace(0, 100, 101))
