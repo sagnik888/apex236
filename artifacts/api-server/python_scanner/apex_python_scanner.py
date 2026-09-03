@@ -2740,9 +2740,11 @@ class ApexScanner:
             real_gamma = math.nan
             real_inst_key = ""
             try:
-                from options_engine import resolve_atm_option, calculate_option_stops, get_option_greeks
-                direction = "LONG" if opt_type == "CE" else "SHORT"
-                contract = resolve_atm_option(symbol, c_price, direction)
+                from broker_upstox import get_upstox_client
+                upstox = get_upstox_client()
+                # Use the EXACT option strike to look up the instrument key,
+                # NOT the current market price which drifts to different ATM strikes!
+                contract = upstox.resolve_option_contract(symbol, opt_type, opt_strike)
                 if contract:
                     real_inst_key = contract.get("instrument_key", "")
             except Exception:
