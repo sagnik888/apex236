@@ -906,7 +906,8 @@ class ScannerEngine:
                     upstox = get_upstox_client()
                     quotes = upstox.get_quote(list(active_opt_keys))
                     for key, q in quotes.items():
-                        live_option_ltps[key] = float(q.get("last_price", math.nan))
+                        inst_key = q.get("instrument_token", key)
+                        live_option_ltps[inst_key] = float(q.get("last_price", math.nan))
                     logger.info(f"DEBUG: active_opt_keys={active_opt_keys} quotes_returned={list(quotes.keys())} live_option_ltps={live_option_ltps}")
                 except Exception as e:
                     logger.warning(f"Failed to fetch live option premiums: {e}")
