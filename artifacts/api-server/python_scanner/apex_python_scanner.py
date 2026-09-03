@@ -2764,6 +2764,10 @@ class ApexScanner:
                     0.52 if abs((c_price - opt_strike) if opt_type == "CE" else (opt_strike - c_price)) < (c_price * 0.01) else 0.45
                 )
 
+                # Lock in historical entry if active, else use the estimated one
+                if active and not math.isnan(active.option_entry):
+                    opt_entry = active.option_entry
+
                 cash_sl1 = active.sl1 if (active and not math.isnan(active.sl1)) else float(row.get("planned_sl1", math.nan))
                 cash_sl2 = active.sl2 if (active and not math.isnan(active.sl2)) else math.nan
                 cash_tsl = active.tsl if (active and not math.isnan(active.tsl)) else math.nan
