@@ -45,8 +45,14 @@ def _seal_direct(df: pd.DataFrame, base: str) -> pd.DataFrame:
             last_start = last_start.replace(tzinfo=IST)
         if now < last_start.astimezone(IST) + pd.Timedelta(minutes=MINUTES[base]):
             out = out.iloc[:-1]
-    elif base == "1d" and out.index[-1].astimezone(IST).date() == now.date():
-        out = out.iloc[:-1]
+    elif base == "1d":
+        last_dt = pd.Timestamp(out.index[-1])
+        if last_dt.tzinfo is None:
+            last_dt = last_dt.tz_localize(IST)
+        else:
+            last_dt = last_dt.tz_convert(IST)
+        if last_dt.date() == now.date():
+            out = out.iloc[:-1]
     return out
 
 
