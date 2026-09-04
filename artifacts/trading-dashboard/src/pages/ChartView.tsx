@@ -322,6 +322,18 @@ export default function ChartView() {
       try {
         if (param.time && macdHistRef.current) {
           macdChart.setCrosshairPosition(NaN, param.time, macdHistRef.current);
+          
+          // Update MACD header when hovering main chart
+          const histVal = param.seriesData?.get(macdHistRef.current);
+          const macdVal = param.seriesData?.get(macdLineRef.current);
+          const sigVal = param.seriesData?.get(macdSignalRef.current);
+          if (macdVal) {
+            setMacdHeader({
+              macd: macdVal.value ?? 0,
+              signal: sigVal?.value ?? 0,
+              hist: histVal?.value ?? 0,
+            });
+          }
         } else {
           macdChart.clearCrosshairPosition();
         }
@@ -449,39 +461,47 @@ export default function ChartView() {
     const chartDataAny = chartData as any;
     if (macdChart && chartDataAny?.macd?.length) {
       const macdArr = chartDataAny.macd as { time: number; macd: number; signal: number; histogram: number }[];
-      const seenMacd = new Set<number>();
-      const sorted = macdArr
-        .filter(m => { if (seenMacd.has(m.time)) return false; seenMacd.add(m.time); return true; })
-        .sort((a, b) => a.time - b.time);
+      
+      // We must construct MACD arrays that exactly match the length and timestamps of the 'candles' array.
+      // If lightweight-charts scales sync by logical range, they will desync wildly if the MACD array
+      // drops the first 33 warmup candles.
+      const macdMap = new Map<number, any>();
+      macdArr.forEach(m => macdMap.set(m.time, m));
+      
+      const alignedHist: any[] = [];
+      const alignedLine: any[] = [];
+      const alignedSig: any[] = [];
+      
+      let lastValid: any = null;
+      
+      candles.forEach(c => {
+        const m = macdMap.get(c.time as number);
+        if (m) {
+          alignedHist.push({ time: c.time as Time, value: m.histogram, color: m.histogram >= 0 ? "#26A69A" : "#EF5350" });
+          alignedLine.push({ time: c.time as Time, value: m.macd });
+          alignedSig.push({ time: c.time as Time, value: m.signal });
+          lastValid = m;
+        } else {
+          // Whitespace padding to align logical indices
+          alignedHist.push({ time: c.time as Time });
+          alignedLine.push({ time: c.time as Time });
+          alignedSig.push({ time: c.time as Time });
+        }
+      });
 
       // Histogram (green when >= 0, red when < 0)
-      try {
-        macdHistRef.current?.setData(
-          sorted.map(m => ({
-            time: m.time as Time,
-            value: m.histogram,
-            color: m.histogram >= 0 ? "#26A69A" : "#EF5350",
-          }))
-        );
-      } catch (e) { console.error("MACD hist:", e); }
+      try { macdHistRef.current?.setData(alignedHist); } catch (e) { console.error("MACD hist:", e); }
 
       // MACD line
-      try {
-        macdLineRef.current?.setData(
-          sorted.map(m => ({ time: m.time as Time, value: m.macd }))
-        );
-      } catch (e) { console.error("MACD line:", e); }
+      try { macdLineRef.current?.setData(alignedLine); } catch (e) { console.error("MACD line:", e); }
 
       // Signal line
-      try {
-        macdSignalRef.current?.setData(
-          sorted.map(m => ({ time: m.time as Time, value: m.signal }))
-        );
-      } catch (e) { console.error("MACD signal:", e); }
+      try { macdSignalRef.current?.setData(alignedSig); } catch (e) { console.error("MACD signal:", e); }
 
       // Update header with latest values
-      const last = sorted[sorted.length - 1];
-      if (last) setMacdHeader({ macd: last.macd, signal: last.signal, hist: last.histogram });
+      if (lastValid) {
+        setMacdHeader({ macd: lastValid.macd, signal: lastValid.signal, hist: lastValid.histogram });
+      }
 
       try { macdChart.timeScale().fitContent(); } catch {}
     }
