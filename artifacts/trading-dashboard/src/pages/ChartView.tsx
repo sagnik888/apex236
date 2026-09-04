@@ -153,6 +153,7 @@ export default function ChartView() {
   const macdSignalRef = useRef<any>(null);
   const [chartReady, setChartReady] = useState(false);
   const [macdHeader, setMacdHeader] = useState({ macd: 0, signal: 0, hist: 0 });
+  const [ohlcHeader, setOhlcHeader] = useState<{o:number, h:number, l:number, c:number} | null>(null);
 
   const safeSymbol    = symbol    || "NIFTY";
   const safeTimeframe = timeframe || "15m";
@@ -337,6 +338,15 @@ export default function ChartView() {
         } else {
           macdChart.clearCrosshairPosition();
         }
+
+        // Update OHLC header
+        const candle = param.seriesData?.get(seriesRef.current);
+        if (candle && (candle as any).open !== undefined) {
+          const c = candle as any;
+          setOhlcHeader({ o: c.open, h: c.high, l: c.low, c: c.close });
+        } else {
+          setOhlcHeader(null);
+        }
       } catch { /* chart may be disposed */ }
       syncingCrosshair = false;
     };
@@ -359,6 +369,15 @@ export default function ChartView() {
           }
         } else {
           mainChart.clearCrosshairPosition();
+        }
+
+        // Update OHLC header
+        const candle = param.seriesData?.get(seriesRef.current);
+        if (candle && (candle as any).open !== undefined) {
+          const c = candle as any;
+          setOhlcHeader({ o: c.open, h: c.high, l: c.low, c: c.close });
+        } else {
+          setOhlcHeader(null);
         }
       } catch { /* chart may be disposed */ }
       syncingCrosshair = false;
@@ -573,6 +592,20 @@ export default function ChartView() {
         <div className="flex-1 flex flex-col bg-background">
           {/* Main candlestick chart — 75% */}
           <div className="relative" style={{ flex: "3 1 0%" }}>
+            {ohlcHeader && (
+              <div className="absolute top-1 left-2 z-10 flex items-center gap-3 text-[11px] font-mono pointer-events-none">
+                <span className="text-muted-foreground font-bold">{safeSymbol}</span>
+                <span className="text-muted-foreground">{safeTimeframe}</span>
+                <span className="text-muted-foreground ml-2">O</span>
+                <span className={ohlcHeader.o > ohlcHeader.c ? "text-[#EF5350]" : "text-[#26A69A]"}>{ohlcHeader.o.toFixed(2)}</span>
+                <span className="text-muted-foreground ml-1">H</span>
+                <span className={ohlcHeader.h > ohlcHeader.c ? "text-[#EF5350]" : "text-[#26A69A]"}>{ohlcHeader.h.toFixed(2)}</span>
+                <span className="text-muted-foreground ml-1">L</span>
+                <span className={ohlcHeader.l > ohlcHeader.c ? "text-[#EF5350]" : "text-[#26A69A]"}>{ohlcHeader.l.toFixed(2)}</span>
+                <span className="text-muted-foreground ml-1">C</span>
+                <span className={ohlcHeader.c >= ohlcHeader.o ? "text-[#26A69A]" : "text-[#EF5350]"}>{ohlcHeader.c.toFixed(2)}</span>
+              </div>
+            )}
             <div className="absolute inset-0" ref={chartContainerRef} />
 
             {(isLoading || (!error && chartData?.candles.length === 0)) && (
