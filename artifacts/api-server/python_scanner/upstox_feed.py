@@ -125,7 +125,8 @@ class UpstoxFeed:
         client.ensure_session()
         if not client._access_token:
             return None
-        url = f"{BASE_URL}/feed/market-data-feed/authorize"
+        # Upstox deprecated the v2 feed authorization endpoint. We must use v3.
+        url = "https://api.upstox.com/v3/feed/market-data-feed/authorize"
         try:
             r = client._http.get(url, headers=client._headers(), timeout=10)
             if r.ok:
@@ -185,7 +186,7 @@ class UpstoxFeed:
             },
         }
         try:
-            self._ws.send(json.dumps(msg))
+            self._ws.send(json.dumps(msg).encode('utf-8'), opcode=websocket.ABNF.OPCODE_BINARY)
             logger.debug("Subscribed Upstox WS to %s keys", len(keys))
         except Exception as exc:
             logger.warning("Upstox WS subscribe failed: %s", exc)
@@ -210,15 +211,34 @@ class UpstoxFeed:
                         return
             else:
                 data = json.loads(message)
+            
             feeds = data.get("feeds", {}) if isinstance(data, dict) else {}
+            if not feeds:
+                logger.debug(f"Upstox WS data missing 'feeds' key. Top-level keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                
             for inst_key, feed_item in feeds.items():
                 if not isinstance(feed_item, dict):
                     continue
                 # Check for full feed or ltp
-                ff = feed_item.get("ff", {}) or feed_item.get("ltpc", {})
-                if not ff:
-                    continue
-                ltp = float(ff.get("ltp") or ff.get("lastPrice") or 0.0)
+                ff_data = feed_item.get("fullFeed", {}) or feed_item.get("ff", {})
+                
+                market_ff = ff_data.get("marketFF", {})
+                index_ff = ff_data.get("indexFF", {})
+                
+                ltpc_data = {}
+                cum_volume = 0.0
+                greeks = {}
+                
+                if market_ff:
+                    ltpc_data = market_ff.get("ltpc", {})
+                    cum_volume = float(market_ff.get("vtt") or market_ff.get("volume") or 0.0)
+                    greeks = market_ff.get("optionGreeks", {})
+                elif index_ff:
+                    ltpc_data = index_ff.get("ltpc", {})
+                else:
+                    ltpc_data = feed_item.get("ltpc", {})
+                    
+                ltp = float(ltpc_data.get("ltp") or ltpc_data.get("lastPrice") or 0.0)
                 if ltp <= 0:
                     continue
 
@@ -228,7 +248,7 @@ class UpstoxFeed:
                         self._option_quotes[inst_key] = {
                             "ltp": ltp,
                             "timestamp": datetime.now(IST_TZ),
-                            "greeks": ff.get("marketFF", {}).get("optionGreeks", {}),
+                            "greeks": greeks,
                         }
 
                 # Update forming candle
@@ -237,7 +257,6 @@ class UpstoxFeed:
                 if not bucket_start:
                     continue
 
-                cum_volume = float(ff.get("v") or ff.get("volume") or 0.0)
                 with self._lock:
                     fc = self._forming_candles.get(inst_key)
                     if not fc or fc["start"] != bucket_start:
