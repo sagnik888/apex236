@@ -211,7 +211,7 @@ export default function Analytics() {
           </div>
 
           <div className="flex items-center gap-1 bg-muted/40 p-1 rounded-lg border border-border shrink-0">
-            {["ALL", "15m", "1h", "4h", "1d"].map((tf) => (
+            {["ALL", "5m", "15m", "1h", "4h", "1d"].map((tf) => (
               <button
                 key={tf}
                 onClick={() => setSelectedTf(tf)}
@@ -242,7 +242,7 @@ export default function Analytics() {
               </tr>
             </thead>
             <tbody className="divide-y divide-border/40 font-mono">
-              {["ALL", "15m", "1h", "4h", "1d"].map((tfKey) => {
+              {["ALL", "5m", "15m", "1h", "4h", "1d"].map((tfKey) => {
                 const tfRow = tfBreakdown[tfKey] || {};
                 const isSelected = selectedTf === tfKey;
                 const wr = tfRow.win_rate_pct ?? 0;

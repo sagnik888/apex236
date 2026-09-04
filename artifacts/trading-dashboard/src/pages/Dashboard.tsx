@@ -531,7 +531,7 @@ export default function Dashboard() {
         <div className="flex items-center gap-4 flex-wrap">
           {/* Timeframe tabs */}
           <div className="flex bg-muted p-1 rounded-md">
-            {["ALL", "15m", "1h", "4h", "1d"].map(tf => (
+            {["ALL", "5m", "15m", "1h", "4h", "1d"].map(tf => (
               <button
                 key={tf}
                 onClick={() => setTimeframe(tf)}

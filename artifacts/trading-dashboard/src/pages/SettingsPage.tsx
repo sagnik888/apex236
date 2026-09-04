@@ -41,9 +41,9 @@ type Settings = {
   trade_style: "intraday" | "intraday_btst" | "all";
 };
 
-const ALL_TFS = ["15m", "1h", "4h", "1d"];
+const ALL_TFS = ["5m", "15m", "1h", "4h", "1d"];
 const DEFAULTS: Settings = {
-  enabled_timeframes: ["15m", "1h", "4h", "1d"],
+  enabled_timeframes: ["5m", "15m", "1h", "4h", "1d"],
   min_score: 60,
   conflict_margin: 20,
   min_adx: 20,

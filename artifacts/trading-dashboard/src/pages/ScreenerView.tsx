@@ -9,7 +9,7 @@ export default function ScreenerView() {
       if (event.data && event.data.type === 'OPEN_CHART') {
         let tf = event.data.timeframe;
         // Map screener micro timeframes to the standard 15m default if they don't map directly to backend chart timeframes
-        if (tf === '5min' || tf === '30min') {
+        if (tf === '30min') {
            tf = '15m'; 
         } else {
            tf = tf.replace('min', 'm');

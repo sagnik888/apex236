@@ -168,6 +168,7 @@ export default function Backtest() {
           <div>
             <label className="text-xs text-muted-foreground block mb-1">Timeframe</label>
             <select className="w-full bg-background border border-border rounded px-2 py-1 text-sm" value={params.timeframe} onChange={(e) => setParams((p) => ({ ...p, timeframe: e.target.value }))}>
+              <option value="5m">5m</option>
               <option value="15m">15m</option>
               <option value="1h">1h</option>
             </select>

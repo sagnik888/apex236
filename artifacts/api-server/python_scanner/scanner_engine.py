@@ -216,6 +216,20 @@ def scan_interval_secs(now: Optional[datetime] = None) -> int:
 # not silently knock the whole symbol out of the scan while stale results
 # stay published.
 _CONFIGS: dict[str, ApexConfig] = {
+    "5m": ApexConfig(
+        min_score=65.0,
+        conflict_margin=15.0,
+        use_htf=True,
+        entry_delay_bars=1,
+        realistic_fills=True,
+        allow_entry_on_last_bar=False,
+        act_on_forming_bar=False,
+        round_trip_cost_pct=0.182,
+        use_session=True,
+        max_input_bars=0,
+        strict_ohlcv=False,
+        signal_cooldown=5,
+    ),
     "15m": ApexConfig(
         min_score=65.0,
         conflict_margin=15.0,

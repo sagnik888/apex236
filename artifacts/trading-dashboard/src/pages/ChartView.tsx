@@ -508,7 +508,7 @@ export default function ChartView() {
           
           {/* Multi-Timeframe Switcher Buttons */}
           <div className="flex items-center gap-1 bg-muted/60 p-1 rounded-md border border-border/50">
-            {["15m", "1h", "4h", "1d"].map((tf) => (
+            {["5m", "15m", "1h", "4h", "1d"].map((tf) => (
               <button
                 key={tf}
                 onClick={() => setLocation(`/chart/${encodeURIComponent(safeSymbol)}/${tf}`)}
